@@ -804,45 +804,32 @@ class Rectification(DUO):  # Training as duo, without curriculum
                                   )
 
 
-class FLM(trainer_base.TrainerBase):
+# ════════════════════════════════════════════════════════════════
+#  FLM (Flow Language Model) family
+# ════════════════════════════════════════════════════════════════
+
+
+class FLMBase(trainer_base.TrainerBase):
+    """Base class for FLM (Flow Language Model) algorithms.
+
+    Provides shared utilities for continuous-time flow matching:
+    time scheduling, corruption, sigma processing, checkpoint
+    handling, and teacher model loading.
+    """
+
     def __init__(self, config, tokenizer):
         super().__init__(config, tokenizer)
-        self._validate_configuration()
         self.t_min = config.algo.t_min
         self.t_max = config.algo.t_max
         self.lut_a2g, self.lut_g2a = utils.build_luts(K=self.vocab_size)
 
-    def on_save_checkpoint(self, checkpoint):
-        checkpoint['state_dict'] = collections.OrderedDict(
-            (k, v) for k, v in checkpoint['state_dict'].items()
-            if not k.startswith('teacher'))
-        super().on_save_checkpoint(checkpoint)
-            
-    def on_load_checkpoint(self, checkpoint):
-        new_state_dict = collections.OrderedDict()
-        for k, v in checkpoint['state_dict'].items():
-            if k.startswith('teacher'):
-                continue
-            new_key = k.replace('._orig_mod.', '.')
-            new_state_dict[new_key] = v
-
-        if self.config.mode == 'sample_eval':
-            # In eval mode, allow loading checkpoints without learnable_loss_weighting
-            if getattr(self.backbone, 'learnable_loss_weighting', None) is not None:
-                if not any(k.startswith('backbone.learnable_loss_weighting') for k in new_state_dict.keys()):
-                    print("Learnable_loss_weighting not found in checkpoint. Initializing from scratch for eval mode.")
-                    for name, param in self.backbone.learnable_loss_weighting.named_parameters():
-                        param_key = f'backbone.learnable_loss_weighting.{name}'
-                        new_state_dict[param_key] = param.data.clone()
-        
-        checkpoint['state_dict'] = new_state_dict
-        super().on_load_checkpoint(checkpoint)
+    def _validate_configuration(self):
+        pass
 
     def training_step(self, batch, batch_idx):
         return super().training_step(batch, batch_idx)
 
-    def _validate_configuration(self):
-        pass
+    # ── sigma / model output ──────────────────────────────────
 
     def _process_sigma(self, sigma):
         if sigma.ndim == 1:
@@ -859,16 +846,53 @@ class FLM(trainer_base.TrainerBase):
     def _process_model_output(self, model_output, xt, sigma):
         del xt, sigma
         return model_output.log_softmax(dim=-1)
-    
+
+    def _process_model_input(self, x0, valid_tokens):
+        return x0, None, valid_tokens
+
+    # ── loss dispatch ─────────────────────────────────────────
+
+    def _loss(self, x0, valid_tokens,
+              current_accumulation_step=None,
+              train_mode=False,
+              xT=None, given_t=None, not_sampling_t=False):
+        """Override to always dispatch to self.loss() for all FLM classes."""
+        (input_tokens, output_tokens,
+         valid_tokens) = self._process_model_input(x0, valid_tokens)
+        loss = self.loss(input_tokens, output_tokens,
+                         current_accumulation_step, train_mode,
+                         xT=xT, given_t=given_t,
+                         not_sampling_t=not_sampling_t)
+        assert loss.ndim == 2
+        if self.ignore_bos:
+            loss[:, 1:] = loss[:, 1:]
+            valid_tokens[:, 1:] = valid_tokens[:, 1:]
+
+        nlls = (loss * valid_tokens).sum()
+        num_tokens = valid_tokens.sum()
+        token_nll = nlls / num_tokens
+        return trainer_base.Loss(loss=token_nll,
+                                 nlls=nlls,
+                                 prior_loss=0.0,
+                                 num_tokens=num_tokens)
+
+    def loss(self, x0, output_tokens,
+             current_accumulation_step=None, train_mode=False,
+             xT=None, given_t=None, not_sampling_t=False):
+        raise NotImplementedError
+
+    def nll(self, input_tokens, output_tokens,
+            current_accumulation_step=None, train_mode=False):
+        raise NotImplementedError
+
+    # ── time scheduling ───────────────────────────────────────
+
     def _sample_t_interval(self, n, accum_step, t_min=None, t_max=None):
         if t_min is None:
             t_min = self.t_min
-        
         if t_max is None:
             t_max = self.t_max
-        
         if accum_step is not None:
-            # During training
             batch_dim = n
             n = self.config.loader.global_batch_size
         _eps_t = torch.rand(n, device=self.device)
@@ -877,105 +901,243 @@ class FLM(trainer_base.TrainerBase):
             _eps_t = (_eps_t / n + offset) % 1
             perm = torch.randperm(n, device=self.device)
             _eps_t = _eps_t[perm]
-
         t = (t_max - t_min) * _eps_t + t_min
         if accum_step is not None:
             t = t.chunk(self.trainer.num_nodes)[self.trainer.node_rank]
             t = t.chunk(self.trainer.num_devices)[self.trainer.local_rank]
-            t = t.chunk(self.trainer.accumulate_grad_batches)[
-                accum_step]
-            # corner case for the last datapoint
+            t = t.chunk(self.trainer.accumulate_grad_batches)[accum_step]
             t = t[:batch_dim]
         return t
 
-    # convert discrete time schedule alpha_t to continuous time schedule gamma_t
     def _alpha_t_to_gamma(self, alpha_t):
+        """Convert discrete time schedule alpha_t to continuous gamma_t."""
         return utils.alpha_to_gamma(alpha_t, self.lut_a2g)
 
     def _gamma_to_alphat(self, gamma_t):
         return utils.gamma_to_alpha(gamma_t, self.lut_g2a)
 
-    def corrupt_continuous(self, x0, t):
-        t = t.unsqueeze(-1).unsqueeze(-1)
+    # ── corruption ────────────────────────────────────────────
 
+    def corrupt_continuous(self, x0, t):
+        """Corrupt data x0 at time t using linear interpolation with Gaussian noise."""
+        t = t.unsqueeze(-1).unsqueeze(-1)
         target_data = F.one_hot(x0, self.vocab_size).float()
         noise = torch.randn_like(target_data, dtype=torch.float32)
         x_t = (1 - t) * noise + t * target_data
-        return x_t, target_data, noise
-    
+        return x_t, target_data
+
+    # ── checkpoint ────────────────────────────────────────────
+
+    def load_state_dict(self, state_dict, strict=True):
+        return super().load_state_dict(state_dict, strict=False)
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint['state_dict'] = collections.OrderedDict(
+            (k, v) for k, v in checkpoint['state_dict'].items()
+            if not k.startswith('teacher'))
+        super().on_save_checkpoint(checkpoint)
+
+    def _filter_checkpoint_state_dict(self, state_dict):
+        """Filter teacher keys and strip _orig_mod from checkpoint state_dict."""
+        new_state_dict = collections.OrderedDict()
+        for k, v in state_dict.items():
+            if k.startswith('teacher'):
+                continue
+            new_key = k.replace('._orig_mod.', '.')
+            new_state_dict[new_key] = v
+        return new_state_dict
+
+    # ── forward helpers ───────────────────────────────────────
+
+    def forward_no_softmax(self, xt, sigma, sigma_prime=None, **kwargs):
+        """Forward through backbone without log-softmax."""
+        sigma = self._process_sigma(sigma)
+        if sigma_prime is not None:
+            sigma_prime = self._process_sigma(sigma_prime)
+        with torch.amp.autocast(device_type=self.device.type, dtype=torch.float32):
+            model_output = self.backbone(xt, sigma, sigma_prime, **kwargs)
+        return model_output
+
+    # ── teacher model utilities ───────────────────────────────
+
+    def _extract_ema_state_dict(self, model, checkpoint):
+        """Extract EMA parameters from checkpoint into a state_dict for model."""
+        ema_state = checkpoint.get('ema', None)
+        if not ema_state:
+            print("Warning: No EMA found, using regular state_dict")
+            return {k.replace('backbone.', '').replace('._orig_mod.', ''): v
+                    for k, v in checkpoint['state_dict'].items()
+                    if k.startswith('backbone.')}
+
+        new_sd = collections.OrderedDict()
+        shadow_params = ema_state['shadow_params']
+        param_names = [n for n, p in model.named_parameters()
+                       if p.requires_grad]
+        print(f"EMA shadow_params: {len(shadow_params)}, "
+              f"Model param_names: {len(param_names)}")
+        min_len = min(len(shadow_params), len(param_names))
+        for name, val in zip(param_names[:min_len],
+                             shadow_params[:min_len]):
+            new_sd[name] = val
+        for k, v in checkpoint['state_dict'].items():
+            clean_k = k.replace('backbone.', '').replace('._orig_mod.', '')
+            if (clean_k not in new_sd
+                    and clean_k in [n for n, _ in model.named_parameters()]):
+                new_sd[clean_k] = v
+                print(f"Loaded missing param from state_dict: {clean_k}")
+        if len(shadow_params) != len(param_names):
+            print(f"Warning: EMA param count mismatch. "
+                  f"Loaded {min_len}/{len(param_names)} from EMA, "
+                  f"rest from state_dict")
+        return new_sd
+
+    def _load_teacher_model(self, path, use_plain_config=True):
+        """Load a frozen teacher model from checkpoint.
+
+        Args:
+            path: Path to checkpoint file.
+            use_plain_config: If True, temporarily disable double_temb and
+                learnable_loss_weighting when building the teacher
+                (to match EMA parameter shapes from a base model).
+        """
+        print(f"Loading teacher model from: {path}")
+        if use_plain_config:
+            saved = (self.config.algo.double_temb,
+                     self.config.algo.learnable_loss_weighting)
+            self.config.algo.double_temb = False
+            self.config.algo.learnable_loss_weighting = False
+
+        assert self.config.algo.backbone == 'dit', \
+            "Only DIT backbone supported for teacher model"
+        model = models.dit.DIT(self.config, vocab_size=self.vocab_size)
+
+        if use_plain_config:
+            (self.config.algo.double_temb,
+             self.config.algo.learnable_loss_weighting) = saved
+
+        checkpoint = torch.load(path, map_location='cpu', weights_only=False)
+        state_dict = self._extract_ema_state_dict(model, checkpoint)
+        model.load_state_dict(state_dict, strict=False)
+        model = model.to(self.device).eval()
+        for param in model.parameters():
+            param.requires_grad = False
+        return model
+
+    def _copy_teacher_weights_to_student(self, teacher_dict):
+        """Copy teacher weights to student backbone and zero-init sigma_map_prime."""
+        with torch.no_grad():
+            student_dict = self.backbone.state_dict()
+            for name, param in teacher_dict.items():
+                print(f"Copying parameter: {name}")
+                if name in student_dict:
+                    student_dict[name].copy_(param)
+            if (hasattr(self.backbone, 'sigma_map_prime')
+                    and self.backbone.sigma_map_prime is not None):
+                for name, param in self.backbone.sigma_map_prime.named_parameters():
+                    if 'mlp.2' in name:
+                        param.zero_()
+                        print(f"Zero initialized student sigma_map_prime: {name}")
+
+    @staticmethod
+    def _zero_init_module(module):
+        for m in module.modules():
+            if isinstance(m, torch.nn.Linear):
+                m.weight.data.zero_()
+                if m.bias is not None:
+                    m.bias.data.zero_()
+
+    @staticmethod
+    def _random_init_module(module, std=0.02):
+        for m in module.modules():
+            if isinstance(m, torch.nn.Linear):
+                m.weight.data.normal_(mean=0.0, std=std)
+                if m.bias is not None:
+                    m.bias.data.zero_()
+
+
+class FLM(FLMBase):
+    """Flow Language Model – continuous-time flow matching training."""
+
+    def on_load_checkpoint(self, checkpoint):
+        if 'state_dict' in checkpoint:
+            checkpoint['state_dict'] = self._filter_checkpoint_state_dict(
+                checkpoint['state_dict'])
+            # In eval mode, allow loading checkpoints without learnable_loss_weighting
+            if self.config.mode == 'sample_eval':
+                if getattr(self.backbone, 'learnable_loss_weighting', None) is not None:
+                    if not any(k.startswith('backbone.learnable_loss_weighting')
+                               for k in checkpoint['state_dict'].keys()):
+                        print("Learnable_loss_weighting not found in checkpoint. "
+                              "Initializing from scratch for eval mode.")
+                        for name, param in self.backbone.learnable_loss_weighting.named_parameters():
+                            param_key = f'backbone.learnable_loss_weighting.{name}'
+                            checkpoint['state_dict'][param_key] = param.data.clone()
+        super().on_load_checkpoint(checkpoint)
+
     def loss(self, x0, output_tokens,
-                  current_accumulation_step=None, train_mode=False, xT=None, given_t=None, not_sampling_t=False):
-        del given_t, not_sampling_t
-        del output_tokens
+             current_accumulation_step=None, train_mode=False,
+             xT=None, given_t=None, not_sampling_t=False):
+        del given_t, not_sampling_t, output_tokens
         B = x0.shape[0]
-
-        t = self._sample_t_interval(B, current_accumulation_step, t_min = self.t_min, t_max = self.t_max)
+        t = self._sample_t_interval(B, current_accumulation_step,
+                                    t_min=self.t_min, t_max=self.t_max)
         c_t = self._alpha_t_to_gamma(t)
-
-        x_t, target_data, noise = self.corrupt_continuous(x0, c_t)
+        x_t, target_data = self.corrupt_continuous(x0, c_t)
         f = self.forward(x_t, t)
         tfm_loss = -(target_data * f).sum(dim=-1)
-        
+
         if self.config.algo.learnable_loss_weighting is True:
             loss_weight = self.backbone.learnable_loss_weighting(t)
             loss_weight = loss_weight.unsqueeze(-1)
             tfm_loss = torch.exp(-loss_weight) * tfm_loss + loss_weight
         return tfm_loss
 
-    def nll(self, input_tokens, output_tokens, current_accumulation_step=None, train_mode=False):
-        raise NotImplementedError
-
-    def _process_model_input(self, x0, valid_tokens):
-        return x0, None, valid_tokens
-    
     @torch.no_grad()
-    def generate_samples(self, num_samples, num_steps=None,
-                         eps=1e-5):
-        """Generate samples from the model."""
+    def generate_samples(self, num_samples, num_steps=None, eps=1e-5):
+        """Generate samples using Euler ODE solver."""
         if num_steps is None:
             num_steps = self.config.sampling.steps
-
         B = num_samples
         V = self.vocab_size
         L = self.num_tokens
         device = self.device
 
-        t_vals = torch.linspace(0.0, 1.0, num_steps + 1, device=device)  
+        t_vals = torch.linspace(0.0, 1.0, num_steps + 1, device=device)
         z = torch.randn((num_samples, L, V), device=device, dtype=self.dtype)
-        
-        for i in range(num_steps):                 
+
+        for i in range(num_steps):
             t_curr = t_vals[i]
             t_next = t_vals[i + 1]
             t_in = t_curr.expand(B)
             c_t_in = self._alpha_t_to_gamma(t_in)
             c_d_in = self._alpha_t_to_gamma(t_next.expand(B)) - c_t_in
-            x_1_pred = self.forward(z, t_in)             
-            x_1_pred_probs = x_1_pred.exp()  
-                           
+            x_1_pred = self.forward(z, t_in)
+            x_1_pred_probs = x_1_pred.exp()
+
             if i == num_steps - 1:
                 z = x_1_pred_probs
                 break
-            
+
             v = (x_1_pred_probs - z) / (1.0 - c_t_in.view(-1, 1, 1) + 1e-5)
             z = z + c_d_in.view(-1, 1, 1) * v
 
         return z.argmax(dim=-1)
-    
-class FLM_distill(trainer_base.TrainerBase):
+
+
+class FLM_distill(FLMBase):
+    """FLM distillation."""
+
     def __init__(self, config, tokenizer):
-        
         super().__init__(config, tokenizer)
-        self._validate_configuration()
-        self.t_min = config.algo.t_min
-        self.t_max = config.algo.t_max
-        
         self.log_flag = False
-        self.lut_a2g, self.lut_g2a = utils.build_luts(K=self.vocab_size)
         self.teacher_model = None
         self._is_resuming = (
-            config.checkpointing.resume_from_ckpt 
-            and config.checkpointing.resume_ckpt_path  is not None
+            config.checkpointing.resume_from_ckpt
+            and config.checkpointing.resume_ckpt_path is not None
         )
+
+    # ── teacher / student initialization ──────────────────────
+
     def setup(self, stage: str):
         if self.teacher_model is None:
             self._initialize_teacher()
@@ -985,309 +1147,134 @@ class FLM_distill(trainer_base.TrainerBase):
         elif self._is_resuming:
             print(">>> Skipping student initialization (resuming from checkpoint).")
 
-    
     def _initialize_teacher(self):
-        path = self.config.algo.teacher_path
-        print(f"Loading teacher model from: {path}")
+        self.teacher_model = self._load_teacher_model(
+            self.config.algo.teacher_path, use_plain_config=True)
 
-        original_double_temb = self.config.algo.double_temb
-        original_learnable_loss_weighting = self.config.algo.learnable_loss_weighting
-        # ensure no double temb and no learnable loss weighting for teacher to match ema parameter
-        self.config.algo.double_temb = False 
-        self.config.algo.learnable_loss_weighting = False
-        
-        assert self.config.algo.backbone == 'dit', "Only DIT model supported for teacher in FLM_distill"
-        model = models.dit.DIT(self.config, vocab_size=self.vocab_size)
-        
-        self.config.algo.double_temb = original_double_temb
-        self.config.algo.learnable_loss_weighting = original_learnable_loss_weighting
-        
-        checkpoint = torch.load(path, map_location='cpu', weights_only=False)
-        state_dict = self._extract_ema_state_dict(model, checkpoint)
-        model.load_state_dict(state_dict, strict=False)
-        self.teacher_model = model.to(self.device).eval()
-        for param in self.teacher_model.parameters():
-            param.requires_grad = False 
-    
-    def _extract_ema_state_dict(self, model, checkpoint):
-        ema_state = checkpoint.get('ema', None)
-        if not ema_state:
-            print("Warning: No EMA found, using regular state_dict")
-            return {k.replace('backbone.', '').replace('._orig_mod.', ''): v 
-                    for k, v in checkpoint['state_dict'].items() if k.startswith('backbone.')}
-
-        new_sd = collections.OrderedDict()
-        shadow_params = ema_state['shadow_params']
-        param_names = [n for n, p in model.named_parameters() if p.requires_grad]
-        
-        print(f"EMA shadow_params: {len(shadow_params)}, Model param_names: {len(param_names)}")
-        
-        # Load EMA params that match
-        min_len = min(len(shadow_params), len(param_names))
-        for name, val in zip(param_names[:min_len], shadow_params[:min_len]):
-            new_sd[name] = val
-        
-        # Fill in any missing parameters from checkpoint state_dict
-        for k, v in checkpoint['state_dict'].items():
-            clean_k = k.replace('backbone.', '').replace('._orig_mod.', '')
-            if clean_k not in new_sd and clean_k in [n for n, _ in model.named_parameters()]:
-                new_sd[clean_k] = v
-                print(f"Loaded missing param from state_dict: {clean_k}")
-        
-        if len(shadow_params) != len(param_names):
-            print(f"Warning: EMA param count mismatch. Loaded {min_len}/{len(param_names)} from EMA, rest from state_dict")
-        
-        return new_sd
-    
     def _initialize_student_from_teacher(self):
-        with torch.no_grad():
-            teacher_dict = self.teacher_model.state_dict()
-            student_dict = self.backbone.state_dict()
+        self._copy_teacher_weights_to_student(self.teacher_model.state_dict())
+        if hasattr(self.backbone, 'output_layer'):
+            self._zero_init_module(self.backbone.output_layer)
+            print("Zero initialized student output_layer")
 
-            for name, param in teacher_dict.items():
-                print(f"Copying parameter: {name}")
-                if name in student_dict:
-                    student_dict[name].copy_(param)
+    # ── checkpoint hooks ──────────────────────────────────────
 
-            if hasattr(self.backbone, 'sigma_map_prime') and self.backbone.sigma_map_prime is not None:
-                for name, param in self.backbone.sigma_map_prime.named_parameters():
-                    if 'mlp.2' in name:
-                        param.zero_()
-                        print(f"Zero initialized student sigma_map_prime: {name}")
-
-            if hasattr(self.backbone, 'output_layer'):
-                self._zero_init_module(self.backbone.output_layer)
-                # self._random_init_module(self.backbone.output_layer)
-                print("Random initialized student output_layer")
-    
     def on_load_checkpoint(self, checkpoint):
         print("Resuming training from checkpoint...")
         self._is_resuming = True
         if self.config.mode == 'sample_eval':
             self._initialize_teacher()
         if 'state_dict' in checkpoint:
-            checkpoint['state_dict'] = {k: v for k, v in checkpoint['state_dict'].items() 
-                                      if not k.startswith('teacher_model.')}
+            checkpoint['state_dict'] = self._filter_checkpoint_state_dict(
+                checkpoint['state_dict'])
         super().on_load_checkpoint(checkpoint)
-        
-    def _zero_init_module(self, module):
-        for m in module.modules():
-            if isinstance(m, torch.nn.Linear):
-                m.weight.data.zero_()
-                if m.bias is not None:
-                    m.bias.data.zero_()
-    
-    def _random_init_module(self, module):
-        for m in module.modules():
-            if isinstance(m, torch.nn.Linear):
-                m.weight.data.normal_(mean=0.0, std=0.02)
-                if m.bias is not None:
-                    m.bias.data.zero_()
 
     def on_train_start(self):
         super().on_train_start()
         if self.teacher_model is None:
-            print("Initializing from checkpoint...")
-            self._initialize_teacher_from_checkpoint(self.config.algo.teacher_path)
-            
-            print("Initializing student from teacher with zero-initialized output layer")
+            print("Initializing teacher model...")
+            self._initialize_teacher()
+            print("Initializing student from teacher")
             self._initialize_student_from_teacher()
 
-    def training_step(self, batch, batch_idx):
-        return super().training_step(batch, batch_idx)
+    # ── teacher forward ───────────────────────────────────────
 
-    def _validate_configuration(self):
-        pass
-
-    def _process_sigma(self, sigma):
-        if sigma.ndim == 1:
-            sigma = sigma.unsqueeze(-1)
-        assert sigma.ndim == 2
-        sigma = sigma.mean(-1).squeeze()
-        if sigma.ndim == 0:
-            sigma = sigma.unsqueeze(0)
-        if not self.config.algo.time_conditioning:
-            sigma = torch.zeros_like(sigma)
-        assert sigma.ndim == 1, sigma.shape
-        return sigma
-
-    def _process_model_output(self, model_output, xt, sigma):
-        del xt, sigma
-        return model_output.log_softmax(dim=-1)
-    
-    def forward_no_softmax(self, xt, sigma, sigma_prime=None):
-
-        sigma = self._process_sigma(sigma)
-        if sigma_prime is not None:
-            sigma_prime = self._process_sigma(sigma_prime)
-        with torch.amp.autocast(device_type=self.device.type, dtype=torch.float32):
-            model_output = self.backbone(xt, sigma, sigma_prime)
-
-        return model_output
-
-    def _sample_t_interval(self, n, accum_step, t_min=None, t_max=None):
-        if t_min is None:
-            t_min = self.t_min
-        
-        if t_max is None:
-            t_max = self.t_max
-        
-        if accum_step is not None:
-            # During training
-            batch_dim = n
-            n = self.config.loader.global_batch_size
-        _eps_t = torch.rand(n, device=self.device)
-        if self.antithetic_sampling:
-            offset = torch.arange(n, device=self.device) / n
-            _eps_t = (_eps_t / n + offset) % 1
-            perm = torch.randperm(n, device=self.device)
-            _eps_t = _eps_t[perm]
-
-        t = (t_max - t_min) * _eps_t + t_min
-        if accum_step is not None:
-            t = t.chunk(self.trainer.num_nodes)[self.trainer.node_rank]
-            t = t.chunk(self.trainer.num_devices)[self.trainer.local_rank]
-            t = t.chunk(self.trainer.accumulate_grad_batches)[
-                accum_step]
-            # corner case for the last datapoint
-            t = t[:batch_dim]
-        return t
-    # convert discrete time schedule alpha_t to continuous time schedule gamma_t
-    def _alpha_t_to_gamma(self, alpha_t):
-        return utils.alpha_to_gamma(alpha_t, self.lut_a2g)
-
-    def _gamma_to_alphat(self, gamma_t):
-        return utils.gamma_to_alpha(gamma_t, self.lut_g2a)
-
-    def corrupt_continuous(self, x0, t):
-        t = t.unsqueeze(-1).unsqueeze(-1)
-
-        target_data = F.one_hot(x0, self.vocab_size).float()
-        noise = torch.randn_like(target_data, dtype=torch.float32)
-        x_t = (1 - t) * noise + t * target_data
-        return x_t, target_data
-    
-    def load_state_dict(self, state_dict, strict=True):
-        return super().load_state_dict(state_dict, strict=False)
-    
-    def teacher_forward(self, xt, t=None, d=None):
-        sigma = t.unsqueeze(-1) if t.ndim == 1 else t
-        sigma = self._process_sigma(sigma)
-        with torch.no_grad(): 
+    def teacher_forward(self, xt, t):
+        """Forward through teacher model (returns log-probabilities)."""
+        sigma = self._process_sigma(t)
+        with torch.no_grad():
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.float32):
                 model_output = self.teacher_model(xt, sigma)
-        
-        return self._process_model_output(model_output=model_output, xt=xt, sigma=sigma)
-    
-    def loss(self, x0, output_tokens,
-                      current_accumulation_step=None, train_mode=False, xT=None, given_t=None, not_sampling_t=False):
-        del given_t, not_sampling_t
-        del output_tokens
-        B = x0.shape[0]
-        L = x0.shape[1]
-        V = self.vocab_size
+        return self._process_model_output(model_output, xt, sigma)
 
-        d_sc = self._sample_t_interval(B, current_accumulation_step, t_min = 0.0, t_max = 1.0).clamp(min=1e-6)
+    # ── loss ──────────────────────────────────────────────────
+
+    def loss(self, x0, output_tokens,
+             current_accumulation_step=None, train_mode=False,
+             xT=None, given_t=None, not_sampling_t=False):
+        del given_t, not_sampling_t, output_tokens
+        B = x0.shape[0]
+
+        d_sc = self._sample_t_interval(
+            B, current_accumulation_step, t_min=0.0, t_max=1.0).clamp(min=1e-6)
         t_sc = torch.rand(B, device=self.device) * (1.0 - d_sc)
         if self.config.algo.add_boundary:
             p_boundary = 1.0 / self.config.algo.boundary_prob
             is_boundary = torch.rand(B, device=self.device) < p_boundary
-            
             t_sc = torch.where(is_boundary, torch.tensor(0.0, device=self.device), t_sc)
             d_sc = torch.where(is_boundary, torch.tensor(1.0, device=self.device), d_sc)
-        
+
         c_t_sc = self._alpha_t_to_gamma(t_sc)
         x_t_sc, _ = self.corrupt_continuous(x0, c_t_sc)
-        f_final_sc = self.forward_no_softmax(x_t_sc, t_sc, t_sc+d_sc)
-        
+        f_final_sc = self.forward_no_softmax(x_t_sc, t_sc, t_sc + d_sc)
+
         with torch.no_grad():
             d_half = d_sc / 2.0
-            d_half_view = d_half.view(-1, 1, 1)
             c_t_sc_view = c_t_sc.view(-1, 1, 1)
 
             c_t_mid = self._alpha_t_to_gamma(t_sc + d_half).view(-1, 1, 1)
             c_t_end = self._alpha_t_to_gamma(t_sc + d_sc).view(-1, 1, 1)
             c_d_half_1 = c_t_mid - c_t_sc_view
             c_d_half_2 = c_t_end - c_t_mid
-            c_d_sc = c_t_end - c_t_sc_view         
+            c_d_sc = c_t_end - c_t_sc_view
             c_t_sc = c_t_sc_view
 
-            f_theta_s = self.teacher_forward(
-                x_t_sc,
-                t_sc,
-            ).exp()
-                
+            f_theta_s = self.teacher_forward(x_t_sc, t_sc).exp()
             v_s_hat = (f_theta_s - x_t_sc) / (1.0 - c_t_sc + 1e-5)
-            g_theta_s_u = self.forward_no_softmax(
-                x_t_sc, 
-                t_sc, 
-                t_sc+d_half,
-            ) 
-                
+            g_theta_s_u = self.forward_no_softmax(x_t_sc, t_sc, t_sc + d_half)
+
             # v_su_hat = v_s(x_s) + 1/2(u-s)g_theta(x_s,u)
-            v_s_u_hat = (f_theta_s - x_t_sc) / (1.0 - c_t_sc + 1e-5) + (c_d_half_1)/2.0 * g_theta_s_u
-            
+            v_s_u_hat = ((f_theta_s - x_t_sc) / (1.0 - c_t_sc + 1e-5)
+                         + (c_d_half_1) / 2.0 * g_theta_s_u)
+
             # F_s,u(x_s) = x_s + (u-s)v_s(x_s) + 1/2(u-s)^2 g_theta(x_s,u)
-            large_f_s_u = x_t_sc + (c_d_half_1) * v_s_hat + 0.5 * (c_d_half_1) ** 2 * g_theta_s_u
-            
-            f_theta_u = self.teacher_forward(
-                large_f_s_u, 
-                t_sc + d_half,
-            ).exp()
-                
+            large_f_s_u = (x_t_sc + c_d_half_1 * v_s_hat
+                           + 0.5 * c_d_half_1 ** 2 * g_theta_s_u)
+
+            f_theta_u = self.teacher_forward(large_f_s_u, t_sc + d_half).exp()
             v_u_hat = (f_theta_u - large_f_s_u) / (1.0 - c_t_mid + 1e-5)
             g_theta_u_t = self.forward_no_softmax(
-                large_f_s_u, 
-                t_sc + d_half, 
-                # d_half,
-                t_sc+d_sc,
-            ) 
+                large_f_s_u, t_sc + d_half, t_sc + d_sc)
 
             # v_u,t_hat(x_u') = v_u(x_u') + 1/2*(t-u)*g_theta(x_u',u, t)
-            v_u_t_hat = v_u_hat + (c_d_half_2)/2.0 * g_theta_u_t
-            
+            v_u_t_hat = v_u_hat + (c_d_half_2) / 2.0 * g_theta_u_t
+
             t_minus_s = c_d_sc
-            v_hat = (c_d_half_1 * v_s_u_hat + c_d_half_2 * v_u_t_hat) / t_minus_s
-            
+            v_hat = (c_d_half_1 * v_s_u_hat
+                     + c_d_half_2 * v_u_t_hat) / t_minus_s
+
             # x_1_hat = stopgrad(x_s + (1-s)*v_hat)
             x_boot = x_t_sc + (1.0 - c_t_sc) * v_hat
             x_boot = x_boot.detach()
-        
+
         f_final_fm = f_theta_s
-            
         weight = 0.5 * c_d_sc * (1.0 - c_t_sc)
         f_final = f_final_fm + weight * f_final_sc
         error = x_boot - f_final  # (B, L, V)
         loss = (error ** 2).mean(dim=-1) * self.vocab_size  # (B, L)
-        
-                            
+
         if self.config.algo.learnable_loss_weighting is True:
             loss_weight = self.backbone.learnable_loss_weighting(t_sc, t_sc + d_sc)
             loss_weight = loss_weight.unsqueeze(-1)
             loss = torch.exp(-loss_weight) * loss + loss_weight
-                
-        return loss
-        
-    def nll(self, input_tokens, output_tokens, current_accumulation_step=None, train_mode=False):
-        raise NotImplementedError
 
-    def _process_model_input(self, x0, valid_tokens):
-        return x0, None, valid_tokens
+        return loss
+
+    # ── sampling ──────────────────────────────────────────────
 
     @torch.no_grad()
-    def generate_samples(self, num_samples, num_steps=None,
-                         eps=1e-5):
-        """Generate samples from the model."""
+    def generate_samples(self, num_samples, num_steps=None, eps=1e-5):
+        """Generate samples using flow map."""
         if num_steps is None:
             num_steps = self.config.sampling.steps
         B = num_samples
         V = self.vocab_size
         L = self.num_tokens
         device = self.device
-    
-        z = torch.randn((num_samples, L, V), device=device, dtype=self.dtype)        
+
+        z = torch.randn((num_samples, L, V), device=device, dtype=self.dtype)
         t_vals = torch.linspace(0.0, 1.0, num_steps + 1, device=device)
-        
+
         for i in range(num_steps):
             t_curr = t_vals[i]
             t_next = t_vals[i + 1]
@@ -1298,315 +1285,145 @@ class FLM_distill(trainer_base.TrainerBase):
             x_1_pred_fm = self.teacher_forward(z, t_in).exp()
             x_1_pred_sc = self.forward_no_softmax(z, t_in, t_next.expand(B))
             v_pred = (x_1_pred_fm - z) / (1.0 - c_t_in.view(-1, 1, 1) + eps)
-            z = z + v_pred * c_d_in.view(-1, 1, 1) + 0.5 * (c_d_in.view(-1, 1, 1) **2) * x_1_pred_sc
-        
-        return z.argmax(dim=-1)
-    
-class FLM_distill_double(trainer_base.TrainerBase):
-    def __init__(self, config, tokenizer):
-        
-        super().__init__(config, tokenizer)
-        self._validate_configuration()
-        self.t_min = config.algo.t_min
-        self.t_max = config.algo.t_max
+            z = (z + v_pred * c_d_in.view(-1, 1, 1)
+                 + 0.5 * (c_d_in.view(-1, 1, 1) ** 2) * x_1_pred_sc)
 
-        self.lut_a2g, self.lut_g2a = utils.build_luts(K=self.vocab_size)
-        
-        # Teacher will be initialized in on_load_checkpoint after student is loaded
+        return z.argmax(dim=-1)
+
+
+class FLM_distill_double(FLMBase):
+    """FLM second-phase distillation."""
+
+    def __init__(self, config, tokenizer):
+        super().__init__(config, tokenizer)
         self.teacher_model_f = None
         self.teacher_model_g = None
-        # Check if we're resuming from checkpoint by looking at config
         self._is_resuming = (
-            config.checkpointing.resume_from_ckpt 
+            config.checkpointing.resume_from_ckpt
             and config.checkpointing.resume_ckpt_path is not None
             and utils.fsspec_exists(config.checkpointing.resume_ckpt_path)
         )
+
+    # ── teacher / student initialization ──────────────────────
 
     def setup(self, stage: str):
         if self.teacher_model_f is None or self.teacher_model_g is None:
             self._initialize_teacher_f()
             self._initialize_teacher_g()
-
         if stage == 'fit' and not self._is_resuming:
             print(">>> Initializing student from teacher...")
             self._initialize_student_from_teacher()
         elif self._is_resuming:
             print(">>> Skipping student initialization (resuming from checkpoint).")
-    
+
     def _initialize_teacher_f(self):
-        path = self.config.algo.teacher_f_path
-        print(f"Loading teacher f model from: {path}")
+        self.teacher_model_f = self._load_teacher_model(
+            self.config.algo.teacher_f_path, use_plain_config=True)
 
-        original_double_temb = self.config.algo.double_temb
-        original_learnable_loss_weighting = self.config.algo.learnable_loss_weighting
-        original_separated_blocks = self.config.algo.n_separated_blocks
-        # ensure no double temb and no learnable loss weighting for teacher to match ema parameter
-        self.config.algo.double_temb = False 
-        self.config.algo.learnable_loss_weighting = False
-        model = models.dit.DIT(self.config, vocab_size=self.vocab_size)
-        
-        self.config.algo.double_temb = original_double_temb
-        self.config.algo.learnable_loss_weighting = original_learnable_loss_weighting
-        
-        checkpoint = torch.load(path, map_location='cpu', weights_only=False)
-        state_dict = self._extract_ema_state_dict(model, checkpoint)
-
-        model.load_state_dict(state_dict, strict=False)
-        self.teacher_model_f = model.to(self.device).eval()
-        for param in self.teacher_model_f.parameters():
-            param.requires_grad = False 
-    
-    # init residual teacher model
     def _initialize_teacher_g(self):
-        path = self.config.algo.teacher_g_path
-        print(f"Loading teacher g model from: {path}")
+        """Load the residual teacher model (uses current config, no plain override)."""
+        self.teacher_model_g = self._load_teacher_model(
+            self.config.algo.teacher_g_path, use_plain_config=False)
 
-        model = models.dit.DIT(self.config, vocab_size=self.vocab_size)
-        
-        checkpoint = torch.load(path, map_location='cpu', weights_only=False)
-        state_dict = self._extract_ema_state_dict(model, checkpoint)
-
-        model.load_state_dict(state_dict, strict=False)
-        self.teacher_model_g = model.to(self.device).eval()
-        for param in self.teacher_model_g.parameters():
-            param.requires_grad = False 
-    
-    def _extract_ema_state_dict(self, model, checkpoint):
-        ema_state = checkpoint.get('ema', None)
-        if not ema_state:
-            print("Warning: No EMA found, using regular state_dict")
-            return {k.replace('backbone.', '').replace('._orig_mod.', ''): v 
-                    for k, v in checkpoint['state_dict'].items() if k.startswith('backbone.')}
-
-        new_sd = collections.OrderedDict()
-        shadow_params = ema_state['shadow_params']
-        param_names = [n for n, p in model.named_parameters() if p.requires_grad]
-        
-        print(f"EMA shadow_params: {len(shadow_params)}, Model param_names: {len(param_names)}")
-        
-        # Load EMA params that match
-        min_len = min(len(shadow_params), len(param_names))
-        for name, val in zip(param_names[:min_len], shadow_params[:min_len]):
-            new_sd[name] = val
-        
-        for k, v in checkpoint['state_dict'].items():
-            clean_k = k.replace('backbone.', '').replace('._orig_mod.', '')
-            if clean_k not in new_sd and clean_k in [n for n, _ in model.named_parameters()]:
-                new_sd[clean_k] = v
-                print(f"Loaded missing param from state_dict: {clean_k}")
-        
-        if len(shadow_params) != len(param_names):
-            print(f"Warning: EMA param count mismatch. Loaded {min_len}/{len(param_names)} from EMA, rest from state_dict")
-        
-        return new_sd
-    
     def _initialize_student_from_teacher(self):
-        with torch.no_grad():
-            teacher_dict = self.teacher_model_f.state_dict()
-            student_dict = self.backbone.state_dict()
-            
-            for name, param in teacher_dict.items():
-                print(f"Copying parameter: {name}")
-                if name in student_dict:
-                    student_dict[name].copy_(param)
+        self._copy_teacher_weights_to_student(self.teacher_model_f.state_dict())
 
-            if hasattr(self.backbone, 'sigma_map_prime') and self.backbone.sigma_map_prime is not None:
-                for name, param in self.backbone.sigma_map_prime.named_parameters():
-                    if 'mlp.2' in name:
-                        param.zero_()
-                        print(f"Zero initialized student sigma_map_prime: {name}")
-    
+    # ── checkpoint hooks ──────────────────────────────────────
+
     def on_load_checkpoint(self, checkpoint):
         print("Resuming training from checkpoint...")
         self._is_resuming = True
-            
         if 'state_dict' in checkpoint:
-            checkpoint['state_dict'] = {k: v for k, v in checkpoint['state_dict'].items() 
-                                      if not k.startswith('teacher_model.')}
+            checkpoint['state_dict'] = self._filter_checkpoint_state_dict(
+                checkpoint['state_dict'])
         super().on_load_checkpoint(checkpoint)
-        
-    def _zero_init_module(self, module):
-        for m in module.modules():
-            if isinstance(m, torch.nn.Linear):
-                m.weight.data.zero_()
-                if m.bias is not None:
-                    m.bias.data.zero_()
-    
-    def _random_init_module(self, module):
-        for m in module.modules():
-            if isinstance(m, torch.nn.Linear):
-                m.weight.data.normal_(mean=0.0, std=0.01)
-                if m.bias is not None:
-                    m.bias.data.zero_()
 
     def on_train_start(self):
         super().on_train_start()
         if self.teacher_model_f is None or self.teacher_model_g is None:
-            print("Initializing from checkpoint...")
-            self._initialize_teacher_from_checkpoint(self.config.algo.teacher_path)
-            
-            print("Initializing student from teacher with zero-initialized output layer")
+            print("Initializing teacher models...")
+            self._initialize_teacher_f()
+            self._initialize_teacher_g()
+            print("Initializing student from teacher")
             self._initialize_student_from_teacher()
 
-    def training_step(self, batch, batch_idx):
-        return super().training_step(batch, batch_idx)
+    # ── teacher forwards ──────────────────────────────────────
 
-    def _validate_configuration(self):
-        pass
-
-    def _process_sigma(self, sigma):
-        if sigma.ndim == 1:
-            sigma = sigma.unsqueeze(-1)
-        assert sigma.ndim == 2
-        sigma = sigma.mean(-1).squeeze()
-        if sigma.ndim == 0:
-            sigma = sigma.unsqueeze(0)
-        if not self.config.algo.time_conditioning:
-            sigma = torch.zeros_like(sigma)
-        assert sigma.ndim == 1, sigma.shape
-        return sigma
-
-    def _process_model_output(self, model_output, xt, sigma):
-        del xt, sigma
-        return model_output.log_softmax(dim=-1)
-    
-    def _sample_t_interval(self, n, accum_step, t_min=None, t_max=None):
-        if t_min is None:
-            t_min = self.t_min
-        
-        if t_max is None:
-            t_max = self.t_max
-        
-        if accum_step is not None:
-            # During training
-            batch_dim = n
-            n = self.config.loader.global_batch_size
-        _eps_t = torch.rand(n, device=self.device)
-        if self.antithetic_sampling:
-            offset = torch.arange(n, device=self.device) / n
-            _eps_t = (_eps_t / n + offset) % 1
-            perm = torch.randperm(n, device=self.device)
-            _eps_t = _eps_t[perm]
-
-        t = (t_max - t_min) * _eps_t + t_min
-        if accum_step is not None:
-            t = t.chunk(self.trainer.num_nodes)[self.trainer.node_rank]
-            t = t.chunk(self.trainer.num_devices)[self.trainer.local_rank]
-            t = t.chunk(self.trainer.accumulate_grad_batches)[
-                accum_step]
-            # corner case for the last datapoint
-            t = t[:batch_dim]
-        return t
-
-    # convert discrete time schedule alpha_t to continuous time schedule gamma_t
-    def _alpha_t_to_gamma(self, alpha_t):
-        return utils.alpha_to_gamma(alpha_t, self.lut_a2g)
-
-    def _gamma_to_alphat(self, gamma_t):
-        return utils.gamma_to_alpha(gamma_t, self.lut_g2a)
-
-    def corrupt_continuous(self, x0, t):
-        t = t.unsqueeze(-1).unsqueeze(-1)
-
-        target_data = F.one_hot(x0, self.vocab_size).float()
-        noise = torch.randn_like(target_data, dtype=torch.float32)
-        x_t = (1 - t) * noise + t * target_data
-        return x_t, target_data
-    
-    def load_state_dict(self, state_dict, strict=True):
-        return super().load_state_dict(state_dict, strict=False)
-    
-    def teacher_f_forward(self, xt, t=None, d=None, use_auxiliary_head=False, use_jvp_attn=False):
-        sigma = t.unsqueeze(-1) if t.ndim == 1 else t
-        sigma = self._process_sigma(sigma)
-        with torch.no_grad(): 
+    def teacher_f_forward(self, xt, t):
+        """Forward through flow teacher model (returns log-probabilities)."""
+        sigma = self._process_sigma(t)
+        with torch.no_grad():
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.float32):
-                model_output = self.teacher_model_f(xt, sigma, use_auxiliary_head=use_auxiliary_head)
-        
-        return self._process_model_output(model_output=model_output, xt=xt, sigma=sigma)
+                model_output = self.teacher_model_f(xt, sigma)
+        return self._process_model_output(model_output, xt, sigma)
 
-    
-    def teacher_g_forward(self, xt, sigma, sigma_prime=None, use_auxiliary_head=False, c_d=None, c_t=None, use_jvp_attn=False):
+    def teacher_g_forward(self, xt, sigma, sigma_prime=None, **kwargs):
+        """Forward through residual teacher model (raw output, no softmax)."""
         sigma = self._process_sigma(sigma)
         if sigma_prime is not None:
             sigma_prime = self._process_sigma(sigma_prime)
         with torch.amp.autocast(device_type=self.device.type, dtype=torch.float32):
-            model_output = self.teacher_model_g(xt, sigma, sigma_prime, use_auxiliary_head=use_auxiliary_head, c_d=c_d, c_t=c_t, use_jvp_attn=use_jvp_attn)
-
+            model_output = self.teacher_model_g(
+                xt, sigma, sigma_prime, **kwargs)
         return model_output
 
-    def forward_no_softmax(self, xt, sigma, sigma_prime=None, use_auxiliary_head=False, c_d=None, c_t=None, use_jvp_attn=False):
+    # ── loss ──────────────────────────────────────────────────
 
-        sigma = self._process_sigma(sigma)
-        if sigma_prime is not None:
-            sigma_prime = self._process_sigma(sigma_prime)
-        with torch.amp.autocast(device_type=self.device.type, dtype=torch.float32):
-            model_output = self.backbone(xt, sigma, sigma_prime, use_auxiliary_head=use_auxiliary_head, c_d=c_d, c_t=c_t, use_jvp_attn=use_jvp_attn)
-
-        return model_output
-    
     def loss(self, x0, output_tokens,
-                      current_accumulation_step=None, train_mode=False, xT=None, given_t=None, not_sampling_t=False):
-        del given_t, not_sampling_t
-        del output_tokens
+             current_accumulation_step=None, train_mode=False,
+             xT=None, given_t=None, not_sampling_t=False):
+        del given_t, not_sampling_t, output_tokens
         B = x0.shape[0]
-        L = x0.shape[1]
-        V = self.vocab_size
-        d_sc = self._sample_t_interval(B, current_accumulation_step, t_min = 0.0, t_max = 1.0).clamp(min=1e-5, max=1.0)
+
+        d_sc = self._sample_t_interval(
+            B, current_accumulation_step,
+            t_min=0.0, t_max=1.0).clamp(min=1e-5, max=1.0)
         t_sc = torch.rand(B, device=self.device) * (1.0 - d_sc)
 
         if self.config.algo.add_boundary:
             p_boundary = 1.0 / self.config.algo.boundary_prob
             is_boundary = torch.rand(B, device=self.device) < p_boundary
-            
             t_sc = torch.where(is_boundary, torch.tensor(0.0, device=self.device), t_sc)
             d_sc = torch.where(is_boundary, torch.tensor(1.0, device=self.device), d_sc)
-            
+
         c_t_sc = self._alpha_t_to_gamma(t_sc)
         x_t_sc, _ = self.corrupt_continuous(x0, c_t_sc)
         c_d_sc = self._alpha_t_to_gamma(t_sc + d_sc) - c_t_sc
-        
+
         f_final_f = self.teacher_f_forward(x_t_sc, t_sc).exp()
         v_f = (f_final_f - x_t_sc) / (1.0 - c_t_sc.view(-1, 1, 1) + 1e-5)
-        f_final_g = self.teacher_g_forward(x_t_sc, t_sc, t_sc+d_sc)
-        F_s_t = x_t_sc + v_f * c_d_sc.view(-1, 1, 1) + 0.5 * (((c_d_sc).view(-1, 1, 1))**2) * f_final_g
+        f_final_g = self.teacher_g_forward(x_t_sc, t_sc, t_sc + d_sc)
+        F_s_t = (x_t_sc + v_f * c_d_sc.view(-1, 1, 1)
+                 + 0.5 * (c_d_sc.view(-1, 1, 1) ** 2) * f_final_g)
+
         student_pred = self.forward(x_t_sc, t_sc, t_sc + d_sc).exp()
         student_v = (student_pred - x_t_sc) / (1.0 - c_t_sc.view(-1, 1, 1) + 1e-5)
-        F_s_t_distilled = x_t_sc + c_d_sc.view(-1,1,1) * student_v
-        
+        F_s_t_distilled = x_t_sc + c_d_sc.view(-1, 1, 1) * student_v
+
         error = F_s_t - F_s_t_distilled
+        loss = (error ** 2).mean(dim=-1) * self.vocab_size
 
-        loss = (error ** 2).mean(dim=-1) * self.vocab_size 
-           
-        
         return loss
-        
-    def nll(self, input_tokens, output_tokens, current_accumulation_step=None, train_mode=False):
-        raise NotImplementedError("FLM only supports meanflow loss")
 
-    def _process_model_input(self, x0, valid_tokens):
-        return x0, None, valid_tokens
+    # ── sampling ──────────────────────────────────────────────
 
     @torch.no_grad()
-    def generate_samples(self, num_samples, num_steps=None,
-                         eps=1e-5):
-        """Generate samples from the model."""
+    def generate_samples(self, num_samples, num_steps=None, eps=1e-5):
+        """Generate samples using flow map."""
         if num_steps is None:
             num_steps = self.config.sampling.steps
-
         print(f" sampling step {num_steps}")
         B = num_samples
         V = self.vocab_size
         L = self.num_tokens
         device = self.device
 
-        t_vals = torch.linspace(0.0, 1.0, num_steps + 1, device=device)  
+        t_vals = torch.linspace(0.0, 1.0, num_steps + 1, device=device)
         z = torch.randn((num_samples, L, V), device=device, dtype=self.dtype)
-        
+
         for i in range(num_steps):
             t_curr = t_vals[i]
             t_next = t_vals[i + 1]
-
             t_in = t_curr.expand(B)
             gamma_t_in = self._alpha_t_to_gamma(t_in)
             c_d_in = self._alpha_t_to_gamma(t_next.expand(B)) - gamma_t_in
@@ -1618,5 +1435,5 @@ class FLM_distill_double(trainer_base.TrainerBase):
 
             v = (x_1_pred_probs - z) / (1.0 - gamma_t_in.view(-1, 1, 1) + eps)
             z = z + v * c_d_in.view(-1, 1, 1)
-                
+
         return z.argmax(dim=-1)

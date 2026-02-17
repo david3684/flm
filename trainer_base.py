@@ -644,12 +644,8 @@ class TrainerBase(L.LightningModule):
         (input_tokens, output_tokens,
          valid_tokens) = self._process_model_input(
             x0, valid_tokens)
-        if self.config.algo.name == 'flm' or self.config.algo.name == 'flm_distill':
-            loss = self.loss(input_tokens, output_tokens,
-                                current_accumulation_step, train_mode)
-        else:
-            loss = self.nll(input_tokens, output_tokens,
-                            current_accumulation_step, train_mode)
+        loss = self.nll(input_tokens, output_tokens,
+                        current_accumulation_step, train_mode)
             
 
         assert loss.ndim == 2
