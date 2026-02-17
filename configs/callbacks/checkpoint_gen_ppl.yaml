@@ -1,0 +1,10 @@
+checkpoint_gen_ppl:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  monitor: val/gen_ppl_T32
+  mode: min
+  save_top_k: 1
+  save_last: False
+  dirpath: ${checkpointing.save_dir}/checkpoints
+  filename: best_gen_ppl
+  auto_insert_metric_name: False
+  verbose: True

@@ -1,0 +1,13 @@
+name: continuousflow
+backbone: dit  # dit / dimamba 
+parameterization: mean
+time_conditioning: True
+T: 1 # one-step sampling
+subs_masking: False
+causal_attention: False
+ignore_bos: False
+loss_type: l2
+flow_ratio: 0.5  # ratio of t = t_prime
+softmax: False
+debug: False
+one_hot_scale: 1.0

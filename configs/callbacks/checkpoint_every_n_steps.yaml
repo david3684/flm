@@ -1,0 +1,8 @@
+checkpoint_every_n_steps:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  save_top_k: -1 # -1 = save all checkpoints triggered by every_n_train_steps, 0 = disable top-k (may also disable every_n_train_steps in some versions)
+  save_last: False # save model as ${save_dir}/checkpoints/last.ckpt
+  dirpath: ${checkpointing.save_dir}/checkpoints
+  verbose: True
+  auto_insert_metric_name: False
+  every_n_train_steps: 25000

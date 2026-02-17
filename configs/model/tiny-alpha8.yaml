@@ -1,0 +1,10 @@
+name: tiny
+type: ddit
+hidden_size: 256
+cond_dim: 128
+length: 8  # alpha8 dataset: 8 letters (no BOS/EOS)
+n_blocks: 8
+n_heads: 8
+scale_by_sigma: True
+dropout: 0.1
+tie_word_embeddings: False

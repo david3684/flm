@@ -1,0 +1,14 @@
+# for flm pretrain (only fm loss)
+
+name: flm
+backbone: dit  # dit / dimamba / hf_dit
+parameterization: mean
+time_conditioning: True
+T: 0  
+subs_masking: False
+causal_attention: False
+ignore_bos: False
+t_max: 1.0
+t_min: 0.0
+double_temb: False
+learnable_loss_weighting: False

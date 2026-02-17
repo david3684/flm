@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Hydra outputs
+outputs/
+
+# Generated samples
+samples/
+
+# Precomputed integrals (regenerate via: python utils.py)
+integral/
+
+# Sweep results
+sweep_results_*/
+
+# Logs
+*.log
+
+# Temp files
+temp.*
+
+# Debug artifacts
+debugging/
+
+# Data files
+*.npy
+*_1sample_data/
+
+# Reference metrics
+reference_metrics/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

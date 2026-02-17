@@ -1,0 +1,41 @@
+# for flm pretrain (only fm loss)
+
+name: flm
+backbone: dit  # dit / dimamba / hf_dit
+parameterization: mean
+time_conditioning: True
+T: 0  # 0 (continuous time) / 1000 
+subs_masking: False
+causal_attention: False
+jvp_api: autograd  # autograd, functorch
+gumbel_tau_log10_start: -1.0
+gumbel_tau_log10_end: -1.0
+curriculum_start: 0
+curriculum_end: 25000
+loss_type: shortcut
+ignore_bos: False
+t_max: 1.0
+t_min: 0.0
+use_curriculum: True
+flow_loss_type: ce # or crossentropy
+shortcut_loss_type: mse # or crossentropy
+flow_ratio: 0.75
+sigma_min: 0.0001
+pred_log_interval: 2000
+double_temb: True
+flow_warmup: False
+use_discrete_schedule: True
+shortcut_k_max: 128
+shortcut_on_alpha_t: True
+sample_d_on_grid: True
+use_continuous_shortcut: False
+add_boundary: True
+bootstrap_ema: True
+bootstrap_argmax: False
+scale_input: False
+scale_loss: False
+tau_log10_fm: 0
+tau_log10_shortcut: 0
+n_separated_blocks: -1
+shortcut_scale_loss: False
+learnable_loss_weighting: True

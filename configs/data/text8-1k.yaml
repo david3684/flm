@@ -1,0 +1,8 @@
+train: text8-1k
+valid: text8-1k
+tokenizer_name_or_path: text8
+cache_dir: ./cache
+wrap: True
+streaming: False
+insert_train_eos: True
+insert_valid_eos: True

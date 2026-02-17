@@ -1,0 +1,10 @@
+train: synthetic-align
+valid: synthetic-align
+tokenizer_name_or_path: synthetic-align
+cache_dir: ./cache
+wrap: True
+streaming: False
+insert_train_eos: True
+insert_valid_eos: True
+save_dir: .tmp
+vocab_size: 50000

@@ -1,0 +1,23 @@
+name: duo
+backbone: dit  # dit / dimamba / hf_dit
+parameterization: mean
+time_conditioning: True
+T: 0  # 0 (continuous time) / 1000 
+subs_masking: False
+causal_attention: False
+gumbel_tau_log10_start: -1.0
+gumbel_tau_log10_end: -2.0
+curriculum_start: 200000
+curriculum_end: 400000
+flow_warmup_steps: 1000000
+integral_cache_path: ${hydra:runtime.cwd}/integral/${data.tokenizer_name_or_path}.pkl
+loss_type: meanflow
+ignore_bos: False
+t_max: 0.9
+t_min: 0.7
+use_curriculum: True
+flow_ratio: 0.75
+sigma_min: 0.0001
+pred_log_interval: 2000
+gamma_min: -3.5
+gamma_max: -1.75

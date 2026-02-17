@@ -1,0 +1,24 @@
+name: flm
+backbone: dit  # dit / dimamba / hf_dit
+parameterization: mean
+time_conditioning: True
+T: 0  # 0 (continuous time) / 1000 
+subs_masking: False
+causal_attention: False
+jvp_api: autograd  # autograd, functorch
+gumbel_tau_log10_start: -2.0
+gumbel_tau_log10_end: -2.0
+curriculum_start: 0
+curriculum_end: 100000
+flow_warmup_steps: 0
+loss_type: meanflow
+ignore_bos: False
+t_max: 0.90
+t_min: 0.55
+use_curriculum: True
+flow_ratio: 0.75
+sigma_min: 0.0001
+pred_log_interval: 2000
+double_temb: False
+flow_warmup: False
+sample_start_from_interval: True

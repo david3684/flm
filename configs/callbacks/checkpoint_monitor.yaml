@@ -1,0 +1,10 @@
+checkpoint_monitor:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  monitor: val/nll # name of the logged metric which determines when model is improving
+  mode: min # can be "max" or "min"
+  save_top_k: 1 # 0 = disable checkpoint saving, -1 = save all, >0 = save top k
+  save_last: True # True = additionally always save model from last epoch
+  dirpath: ${checkpointing.save_dir}/checkpoints
+  filename: best_nll
+  auto_insert_metric_name: False
+  verbose: True

@@ -1,0 +1,11 @@
+name: DMF
+backbone: dit 
+parameterization: mean
+time_conditioning: True
+T: 1 # one-step sampling
+subs_masking: False
+causal_attention: False
+ignore_bos: False
+loss_type: l2
+jvp_api: autograd  # autograd, functorch
+flow_ratio: 0.5  # ratio of t = t_prime
