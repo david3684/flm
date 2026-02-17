@@ -856,9 +856,8 @@ class FLM(trainer_base.TrainerBase):
         assert sigma.ndim == 1, sigma.shape
         return sigma
 
-    def _process_model_output(self, model_output, xt, sigma, cap_value = 30.0):
+    def _process_model_output(self, model_output, xt, sigma):
         del xt, sigma
-        model_output = cap_value * torch.tanh(model_output / cap_value)
         return model_output.log_softmax(dim=-1)
     
     def _sample_t_interval(self, n, accum_step, t_min=None, t_max=None):
@@ -967,15 +966,8 @@ class FLM_distill(trainer_base.TrainerBase):
         
         super().__init__(config, tokenizer)
         self._validate_configuration()
-        self.flow_ratio = config.algo.flow_ratio
         self.t_min = config.algo.t_min
         self.t_max = config.algo.t_max
-        self._base_num_steps = float(config.algo.base_num_steps)
-        self.d_max_step_size = 1.0 / self._base_num_steps
-        self.progressive_distill = config.algo.progressive_distill
-        if self.progressive_distill:
-            self.distill_round = 0
-            self.step_per_round = 10000
         
         self.log_flag = False
         self.lut_a2g, self.lut_g2a = utils.build_luts(K=self.vocab_size)
@@ -1119,9 +1111,8 @@ class FLM_distill(trainer_base.TrainerBase):
         assert sigma.ndim == 1, sigma.shape
         return sigma
 
-    def _process_model_output(self, model_output, xt, sigma, cap_value = 30.0):
+    def _process_model_output(self, model_output, xt, sigma):
         del xt, sigma
-        model_output = cap_value * torch.tanh(model_output / cap_value)
         return model_output.log_softmax(dim=-1)
     
     def forward_no_softmax(self, xt, sigma, sigma_prime=None):
@@ -1188,47 +1179,25 @@ class FLM_distill(trainer_base.TrainerBase):
         
         return self._process_model_output(model_output=model_output, xt=xt, sigma=sigma)
     
-    def zero_center_output(self, model_output):
-        centered_output = model_output - model_output.mean(dim=-1, keepdim=True)
-        return centered_output
-
-    def _maybe_update_progressive_d_max_step(self):
-        if not self.progressive_distill:
-            return
-        if self.step_per_round <= 0:
-            return
-        current_round = int(self.global_step // self.step_per_round)
-        if current_round != self.distill_round:
-            self.distill_round = current_round
-            self.d_max_step_size = (2 ** self.distill_round) / self._base_num_steps
-            if self.d_max_step_size >= 1:
-                self.d_max_step_size = 1.0
-    
     def loss(self, x0, output_tokens,
                       current_accumulation_step=None, train_mode=False, xT=None, given_t=None, not_sampling_t=False):
         del given_t, not_sampling_t
         del output_tokens
-        self._maybe_update_progressive_d_max_step()
         B = x0.shape[0]
         L = x0.shape[1]
         V = self.vocab_size
-        K_max = self.config.algo.base_num_steps
-        d_min = 1.0 / K_max
-        max_power = int(math.log2(K_max))
 
-        d_sc = self._sample_t_interval(B, current_accumulation_step, t_min = 0.0, t_max = self.d_max_step_size).clamp(min=1e-6)
-        # d_sc = self.d_max_step * torch.ones(B, device=self.device)
+        d_sc = self._sample_t_interval(B, current_accumulation_step, t_min = 0.0, t_max = 1.0).clamp(min=1e-6)
         t_sc = torch.rand(B, device=self.device) * (1.0 - d_sc)
         if self.config.algo.add_boundary:
             p_boundary = 1.0 / self.config.algo.boundary_prob
             is_boundary = torch.rand(B, device=self.device) < p_boundary
             
             t_sc = torch.where(is_boundary, torch.tensor(0.0, device=self.device), t_sc)
-            # d_sc = torch.where(is_boundary, torch.tensor(1.0, device=self.device), d_sc)
+            d_sc = torch.where(is_boundary, torch.tensor(1.0, device=self.device), d_sc)
         
         c_t_sc = self._alpha_t_to_gamma(t_sc)
         x_t_sc, _ = self.corrupt_continuous(x0, c_t_sc)
-        
         f_final_sc = self.forward_no_softmax(x_t_sc, t_sc, t_sc+d_sc)
         
         with torch.no_grad():
@@ -1323,12 +1292,12 @@ class FLM_distill(trainer_base.TrainerBase):
             t_curr = t_vals[i]
             t_next = t_vals[i + 1]
             t_in = t_curr.expand(B)
-            gamma_t_in = self._alpha_t_to_gamma(t_in)
-            c_d_in = self._alpha_t_to_gamma(t_next.expand(B)) - gamma_t_in
+            c_t_in = self._alpha_t_to_gamma(t_in)
+            c_d_in = self._alpha_t_to_gamma(t_next.expand(B)) - c_t_in
 
             x_1_pred_fm = self.teacher_forward(z, t_in).exp()
             x_1_pred_sc = self.forward_no_softmax(z, t_in, t_next.expand(B))
-            v_pred = (x_1_pred_fm - z) / (1.0 - gamma_t_in.view(-1, 1, 1) + eps)
+            v_pred = (x_1_pred_fm - z) / (1.0 - c_t_in.view(-1, 1, 1) + eps)
             z = z + v_pred * c_d_in.view(-1, 1, 1) + 0.5 * (c_d_in.view(-1, 1, 1) **2) * x_1_pred_sc
         
         return z.argmax(dim=-1)
@@ -1374,10 +1343,7 @@ class FLM_distill_double(trainer_base.TrainerBase):
         # ensure no double temb and no learnable loss weighting for teacher to match ema parameter
         self.config.algo.double_temb = False 
         self.config.algo.learnable_loss_weighting = False
-        if self.config.algo.backbone == 'dit':
-            model = models.dit.DIT(self.config, vocab_size=self.vocab_size)
-        elif self.config.algo.backbone == 'dimamba':
-            model = models.dimamba.DiMamba(self.config, vocab_size=self.vocab_size, pad_token_id=self.tokenizer.pad_token_id)
+        model = models.dit.DIT(self.config, vocab_size=self.vocab_size)
         
         self.config.algo.double_temb = original_double_temb
         self.config.algo.learnable_loss_weighting = original_learnable_loss_weighting
@@ -1500,12 +1466,10 @@ class FLM_distill_double(trainer_base.TrainerBase):
         assert sigma.ndim == 1, sigma.shape
         return sigma
 
-    def _process_model_output(self, model_output, xt, sigma, cap_value = 30.0):
+    def _process_model_output(self, model_output, xt, sigma):
         del xt, sigma
-        model_output = cap_value * torch.tanh(model_output / cap_value)
         return model_output.log_softmax(dim=-1)
     
-
     def _sample_t_interval(self, n, accum_step, t_min=None, t_max=None):
         if t_min is None:
             t_min = self.t_min
