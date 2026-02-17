@@ -543,30 +543,17 @@ def compute_alpha_exact_torch(gamma, K: int, x_np, w_np, sigma_floor: float = 1e
     w = w / np.sqrt(np.pi)
     z_nodes = torch.sqrt(torch.tensor(2.0, dtype=dtype, device=device)) * x
 
-    # 3. Broadcasting
-    # m_c: (B,) -> (B, 1)
-    # z_nodes: (n_gh,) -> (1, n_gh)
-    # 입력 gamma 형태가 (B, ...) 일 수 있으므로 마지막 차원에 붙입니다.
-    m_c_expanded = m_c.unsqueeze(-1) 
+    m_c_expanded = m_c.unsqueeze(-1)
     z_expanded = z_nodes.unsqueeze(0)
 
-    # 4. Compute Log-CDFs
-    # scipy.special.log_ndtr -> torch.special.log_ndtr (PyTorch 1.12+ 지원)
-    # L_cu = log(Phi(z + m_c))
     L_cu = torch.special.log_ndtr(z_expanded + m_c_expanded)
 
-    # 5. Weighted sum
     log_prod_c = (K - 1) * L_cu
     
-    # w: (n_gh,) -> (1, n_gh) broadcasting
-    # sum(w * exp(log_prod_c)) along the last dimension
     q_c = torch.sum(w.unsqueeze(0) * torch.exp(log_prod_c), dim=-1)
     
-    # Formula Adjustment
-    # alpha = K/(K-1.) * (q_c - 1./K)
     alpha = (K / (K - 1.0)) * (q_c - (1.0 / K))
 
-    # Monotonicity trick
     alpha = alpha + (gamma - 1) * 1e-10
 
     alpha = torch.clamp(alpha, 0.0, 1.0)

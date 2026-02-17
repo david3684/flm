@@ -16,5 +16,5 @@ python -u -m main \
   sampling.num_sample_batches=64 \
   sampling.steps=$STEPS \
   +wandb.offline=true \
-  sampling.noise_removal=greedy \
+  sampling.noise_removal=ancestral \
   sampling.predictor=ancestral
