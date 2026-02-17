@@ -110,9 +110,6 @@ class TrainerBase(L.LightningModule):
             gen_ppl_eval_model_name_or_path=self.config.eval.gen_ppl_eval_model_name_or_path,
             eval_ppl_batch_size=self.config.eval.perplexity_batch_size)
 
-        if getattr(self.config.algo, "final_layer_remove_bias", False):
-            self._remove_final_layer_bias_from_student()
-
         self.ema_decay_list = self._parse_ema_decay_list(
             self.config.training.ema)
         self.ema_list = {}
@@ -144,19 +141,6 @@ class TrainerBase(L.LightningModule):
         self.fast_forward_batches = None
         self.target_tokens = None
 
-    def _remove_final_layer_bias_from_student(self):
-        if hasattr(self.backbone, 'output_layer'):
-            final_linear = getattr(self.backbone.output_layer, 'linear', None)
-            if isinstance(final_linear, torch.nn.Linear) and final_linear.bias is not None:
-                final_linear.register_parameter('bias', None)
-                print("[DEBUG] Removed student final layer linear bias (pre-EMA init).")
-                print(f"[DEBUG] Bias removed check: {final_linear.bias is None}")
-            else:
-                print("[DEBUG] Student final layer linear bias already absent or not found (pre-EMA init).")
-                if isinstance(final_linear, torch.nn.Linear):
-                    print(f"[DEBUG] Bias absent check: {final_linear.bias is None}")
-        else:
-            print("[DEBUG] Student output_layer not found; bias removal skipped (pre-EMA init).")
 
     def _validate_configuration(self):
         assert self.config.algo.backbone in {'dit', 'hf_dit'}
@@ -420,24 +404,7 @@ class TrainerBase(L.LightningModule):
                     persistent_workers=True))
         self.trainer.fit_loop._combined_loader.flattened = updated_dls
 
-        # if self.trainer.is_global_zero:
-        #     if hasattr(self.trainer, 'logger') and hasattr(self.trainer.logger, 'experiment'):
-        #         if wandb.run is not None:
-        #             wandb.watch(self.backbone, log="all", log_freq=100)
-
     def optimizer_step(self, *args, **kwargs):
-        
-        # with torch.no_grad():
-        #     sq_sum = 0.0
-        #     for p in self.backbone.parameters():
-        #         if p.grad is not None:
-        #             sq_sum += p.grad.detach().pow(2).sum().item()
-        #     total_norm = sq_sum ** 0.5
-        #     self.log("grad_norm", total_norm, prog_bar=True, sync_dist=True)
-        if self.global_step % 1000 == 0 and self.trainer.is_global_zero:
-            missing = [n for n,p in self.backbone.named_parameters() if p.requires_grad and p.grad is None]
-            print(f"missing_grad: {len(missing)}/{sum(p.requires_grad for _,p in self.backbone.named_parameters())}")
-            print("  examples:", missing[:20])
         super().optimizer_step(*args, **kwargs)
         if self.ema_list:
             for ema_obj in self.ema_list.values():
@@ -516,21 +483,6 @@ class TrainerBase(L.LightningModule):
         assert self.metrics.valid_nlls.nll.mean_value == 0
         assert self.metrics.valid_nlls.nll.weight == 0
 
-        if (self.global_step == 0 and self.trainer.global_rank == 0
-                and hasattr(self.trainer.logger, 'log_table')):
-            dataset_name = self.config.data.get('train', '')
-            if '1sample' in dataset_name or '1-sample' in dataset_name:
-                # Get a batch from validation dataloader to show the target
-                val_batch = next(iter(self.trainer.val_dataloaders))
-                self.target_tokens = val_batch['input_ids'][0].to(self.device)
-                target_text = self.tokenizer.decode(self.target_tokens)
-
-                print(f"\n{'='*80}")
-                print("TARGET SAMPLE (1-sample dataset):")
-                print(f"{'='*80}")
-                print(target_text)
-                print(f"{'='*80}\n")
-
     def validation_step(self, batch, batch_idx):
         del batch_idx
         losses = self._loss(batch['input_ids'],
@@ -549,108 +501,58 @@ class TrainerBase(L.LightningModule):
         if ((self.config.eval.compute_perplexity_on_sanity
              or not self.trainer.sanity_checking)
                 and self.config.eval.generate_samples):
-            py_rng_state = random.getstate()
-            np_rng_state = np.random.get_state()
-            torch_rng_state = torch.get_rng_state()
-            cuda_rng_state = None
-            if torch.cuda.is_available():
-                cuda_rng_state = torch.cuda.get_rng_state_all()
 
-            try:
-                if hasattr(self.config, 'seed') and self.config.seed is not None:
-                    seed = int(self.config.seed)
-                    if hasattr(self, 'trainer') and self.trainer is not None:
-                        seed = seed + int(self.trainer.global_rank)
-                    random.seed(seed)
-                    np.random.seed(seed)
-                    torch.manual_seed(seed)
-                    if torch.cuda.is_available():
-                        torch.cuda.manual_seed_all(seed)
+            step_list = self.config.sampling.steps
+            if isinstance(step_list, ListConfig):
+                step_list = list(step_list)
+            elif isinstance(step_list, int):
+                step_list = [step_list]
 
-                step_list = self.config.sampling.steps
-                if isinstance(step_list, ListConfig):
-                    step_list = list(step_list)
-                elif isinstance(step_list, int):
-                    step_list = [step_list]
+            for num_steps in step_list:
+                if hasattr(self.metrics, 'gen_ppl'):
+                    self.metrics.gen_ppl.reset()
+                if hasattr(self.metrics, 'sample_entropy'):
+                    self.metrics.sample_entropy.reset()
 
-                sampler_list = getattr(self.config.sampling, 'noise_removal_list', None)
-                if sampler_list is None:
-                    noise_removal = getattr(self.config.sampling, 'noise_removal', 'uniform')
-                    if isinstance(noise_removal, str) and ',' in noise_removal:
-                        sampler_list = [s.strip() for s in noise_removal.split(',') if s.strip()]
-                    else:
-                        sampler_list = [noise_removal]
-                elif isinstance(sampler_list, str):
-                    sampler_list = [s.strip() for s in sampler_list.split(',') if s.strip()]
-                elif isinstance(sampler_list, (list, ListConfig)):
-                    sampler_list = list(sampler_list)
-                else:
-                    sampler_list = [str(sampler_list)]
+                current_text_samples = []
 
-                original_noise_removal = getattr(self.config.sampling, 'noise_removal', None)
-                
-                use_sampler_suffix = len(sampler_list) > 1
+                for _ in range(self.config.sampling.num_sample_batches):
+                    samples = self.generate_samples(
+                        num_samples=self.config.loader.eval_batch_size,
+                        num_steps=num_steps
+                    )
 
-                for num_steps in step_list:
-                    for sampler_name in sampler_list:
-                        if hasattr(self.config.sampling, 'noise_removal'):
-                            self.config.sampling.noise_removal = sampler_name
+                    self.metrics.record_entropy(samples)
 
-                        if hasattr(self.metrics, 'gen_ppl'):
-                            self.metrics.gen_ppl.reset()
-                        if hasattr(self.metrics, 'sample_entropy'):
-                            self.metrics.sample_entropy.reset()
+                    decoded_batch = self.tokenizer.batch_decode(samples)
 
-                        current_text_samples = []
+                    if len(current_text_samples) < self.config.sampling.num_sample_log:
+                        current_text_samples.extend(decoded_batch)
 
-                        for _ in range(self.config.sampling.num_sample_batches):
-                            samples = self.generate_samples(
-                                num_samples=self.config.loader.eval_batch_size,
-                                num_steps=num_steps
-                            )
+                    if self.config.eval.compute_generative_perplexity:
+                        self.metrics.record_generative_perplexity(
+                            decoded_batch, self.num_tokens, self.device)
 
-                            self.metrics.record_entropy(samples)
+                if self.config.eval.compute_generative_perplexity:
+                    self.log(f'val/gen_ppl_T{num_steps}',
+                            self.metrics.gen_ppl.compute(),
+                            on_epoch=True,
+                            on_step=False,
+                            sync_dist=True)
+                    self.log(f'val/sample_entropy_T{num_steps}',
+                            self.metrics.sample_entropy.compute(),
+                            on_epoch=True,
+                            on_step=False,
+                            sync_dist=True)
 
-                            decoded_batch = self.tokenizer.batch_decode(samples)
+                if self.trainer.global_rank == 0 and hasattr(self.trainer.logger, 'log_table'):
+                    log_samples = current_text_samples[:self.config.sampling.num_sample_log]
 
-                            if len(current_text_samples) < self.config.sampling.num_sample_log:
-                                current_text_samples.extend(decoded_batch)
-
-                            if self.config.eval.compute_generative_perplexity:
-                                self.metrics.record_generative_perplexity(
-                                    decoded_batch, self.num_tokens, self.device)
-
-                        suffix = f'_{sampler_name}' if use_sampler_suffix else ''
-                        
-                        if self.config.eval.compute_generative_perplexity:
-                            self.log(f'val/gen_ppl_T{num_steps}{suffix}',
-                                     self.metrics.gen_ppl.compute(),
-                                     on_epoch=True,
-                                     on_step=False,
-                                     sync_dist=True)
-                            self.log(f'val/sample_entropy_T{num_steps}{suffix}',
-                                     self.metrics.sample_entropy.compute(),
-                                     on_epoch=True,
-                                     on_step=False,
-                                     sync_dist=True)
-
-                        if self.trainer.global_rank == 0 and hasattr(self.trainer.logger, 'log_table'):
-                            log_samples = current_text_samples[:self.config.sampling.num_sample_log]
-
-                            self.trainer.logger.log_table(
-                                key=f'samples_T{num_steps}{suffix}@global_step{self.global_step}',
-                                columns=['Generated Samples'],
-                                data=[[s] for s in log_samples]
-                            )
-
-                if original_noise_removal is not None:
-                    self.config.sampling.noise_removal = original_noise_removal
-            finally:
-                random.setstate(py_rng_state)
-                np.random.set_state(np_rng_state)
-                torch.set_rng_state(torch_rng_state)
-                if cuda_rng_state is not None:
-                    torch.cuda.set_rng_state_all(cuda_rng_state)
+                    self.trainer.logger.log_table(
+                        key=f'samples_T{num_steps}@global_step{self.global_step}',
+                        columns=['Generated Samples'],
+                        data=[[s] for s in log_samples]
+                    )
 
         self._train_mode()
 
@@ -698,120 +600,14 @@ class TrainerBase(L.LightningModule):
             print('xT saved to:', xT_path)
             print('x0 saved to:', x0_path)
         return
-    # def configure_model(self):
-    #     torch._dynamo.reset()
-    #     super().configure_model()
-    #     if not isinstance(self.backbone, torch._dynamo.OptimizedModule):
-    #         print("[INFO] Applying torch.compile")
-    #         self.backbone = torch.compile(
-    #             self.backbone,
-    #             mode="default",  # 또는 "default", "max-autotune"
-    #             dynamic=False,           # shape이 고정이라면
-    #             fullgraph=True
-    #         )
     def configure_optimizers(self):
-        optim_name = getattr(self.config.optim, "name", "adamw")
-        use_muon = getattr(self.config.optim, "use_muon", False) or str(optim_name).lower() == "muon"
-
-        if use_muon:
-            muon_lr = getattr(self.config.optim, "muon_lr", self.config.optim.lr)
-            muon_momentum = getattr(self.config.optim, "muon_momentum", 0.95)
-            muon_weight_decay = getattr(self.config.optim, "muon_weight_decay", self.config.optim.weight_decay)
-
-            adam_lr = self.config.optim.lr
-            adam_betas = (self.config.optim.beta1, self.config.optim.beta2)
-            adam_eps = self.config.optim.eps
-            adam_weight_decay = self.config.optim.weight_decay
-
-            muon_params = []
-            adam_params = []
-            for name, p in itertools.chain(self.backbone.named_parameters(), self.noise.named_parameters()):
-                if not p.requires_grad:
-                    continue
-                name_l = name.lower()
-                is_embed = any(key in name_l for key in ["embed", "embedding", "vocab_embed"])
-                is_output = any(key in name_l for key in ["output_layer", "lm_head", "classifier", "final"])
-                if p.ndim < 2 or is_embed or is_output:
-                    adam_params.append(p)
-                else:
-                    muon_params.append(p)
-
-            param_groups = []
-            if adam_params:
-                param_groups.append(
-                    dict(
-                        params=adam_params,
-                        lr=adam_lr,
-                        betas=adam_betas,
-                        eps=adam_eps,
-                        weight_decay=adam_weight_decay,
-                        use_muon=False,
-                    )
-                )
-            if muon_params:
-                param_groups.append(
-                    dict(
-                        params=muon_params,
-                        lr=muon_lr,
-                        momentum=muon_momentum,
-                        weight_decay=muon_weight_decay,
-                        use_muon=True,
-                    )
-                )
-
-            is_distributed = dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
-            optimizer_cls = MuonWithAuxAdam if is_distributed else SingleDeviceMuonWithAuxAdam
-            optimizer = optimizer_cls(param_groups)
-        else:
-            if getattr(self.config.algo, "final_layer_weight_decay", False):
-                final_linear_weight = None
-                if hasattr(self.backbone, 'output_layer'):
-                    final_linear = getattr(self.backbone.output_layer, 'linear', None)
-                    if isinstance(final_linear, torch.nn.Linear):
-                        final_linear_weight = final_linear.weight
-
-                param_groups = []
-                final_weight_params = []
-                other_params = []
-                for p in self._get_parameters():
-                    if (final_linear_weight is not None) and (p is final_linear_weight):
-                        print("append final linear weight with decay")
-                        final_weight_params.append(p)
-                    else:
-                        other_params.append(p)
-
-                if other_params:
-                    param_groups.append(
-                        dict(params=other_params, weight_decay=0.0)
-                    )
-                if final_weight_params:
-                    param_groups.append(
-                        dict(params=final_weight_params, weight_decay=0.01)
-                    )
-
-                optimizer = torch.optim.AdamW(
-                    param_groups,
-                    lr=self.config.optim.lr,
-                    betas=(self.config.optim.beta1,
-                           self.config.optim.beta2),
-                    eps=self.config.optim.eps)
-                print("[DEBUG] final_layer_weight_decay enabled: only output_layer.linear.weight uses weight_decay=0.01")
-                if final_linear_weight is None:
-                    print("[DEBUG] output_layer.linear not found; no final layer weight decay applied.")
-                else:
-                    print("[DEBUG] output_layer.linear.weight found; final layer weight decay applied.")
-                if final_weight_params and not other_params:
-                    print("[DEBUG] Param groups check: only final layer weight present.")
-                else:
-                    print(f"[DEBUG] Param groups check: final_weight_params={len(final_weight_params)}, other_params={len(other_params)}")
-            else:
-                optimizer = torch.optim.AdamW(
-                    self._get_parameters(),
-                    lr=self.config.optim.lr,
-                    betas=(self.config.optim.beta1,
-                           self.config.optim.beta2),
-                    eps=self.config.optim.eps,
-                    weight_decay=self.config.optim.weight_decay)
+        optimizer = torch.optim.AdamW(
+            self._get_parameters(),
+            lr=self.config.optim.lr,
+            betas=(self.config.optim.beta1,
+                    self.config.optim.beta2),
+            eps=self.config.optim.eps,
+            weight_decay=self.config.optim.weight_decay)
 
         scheduler = hydra.utils.instantiate(
             self.config.lr_scheduler, optimizer=optimizer)
