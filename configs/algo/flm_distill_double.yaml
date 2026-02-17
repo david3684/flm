@@ -10,8 +10,9 @@ teacher_g_path: null
 subs_masking: False
 causal_attention: False
 ignore_bos: False
-use_curriculum: True
+t_min: 0.0
+t_max: 1.0
+use_curriculum: False
 double_temb: True
 add_boundary: True
-bootstrap_ema: True
-learnable_loss_weighting: False
+learnable_loss_weighting: True

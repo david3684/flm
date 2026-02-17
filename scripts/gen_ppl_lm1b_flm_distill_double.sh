@@ -1,4 +1,5 @@
 CKPT_PATH="YOUR_CHECKPOINT_PATH"
+STEPS=32
 
 python -u -m main \
       mode=sample_eval \
@@ -6,19 +7,12 @@ python -u -m main \
       model=small \
       model.length=128 \
       data=lm1b-wrap \
-      algo=flm_shortcut \
+      algo=flm_distill_double \
       eval.checkpoint_path=$CKPT_PATH \
-      sampling.tau_log10=0.0 \
       loader.batch_size=2 \
-      loader.eval_batch_size=32 \
+      loader.eval_batch_size=1 \
       sampling.num_sample_batches=1 \
-      sampling.steps=128 \
-      sampling.solver=euler \
+      sampling.steps=$STEPS \
       algo.double_temb=True \
-      sampling.noise_removal=shortcut_alpha \
-      algo.time_condition=alpha_t \
       eval.disable_ema=False \
-      algo.n_separated_blocks=2 \
-      +wandb.offline=true
-
-
+      +wandb.offline=true \

@@ -2,9 +2,9 @@ python -u -m main \
     loader.global_batch_size=512 \
     loader.batch_size=128 \
     loader.eval_batch_size=128 \
-    data=lm1b-wrap \
-    data.cache_dir=/home/work/RADAR/workspace/KAIST/cdBDD/datasets/lm1b \
-    wandb.project=lm1b_distill \
+    data=openwebtext-split \
+    data.cache_dir=/home/work/RADAR/workspace/KAIST/cdBDD/datasets/openwebtext \
+    wandb.project=owt_distill \
     wandb.name=flm_diatill \
     model=small \
     algo=flm_semigroup_distill \
@@ -12,8 +12,9 @@ python -u -m main \
     trainer.max_steps=1000000 \
     trainer.precision=bf16 \
     trainer.val_check_interval=10000 \
-    model.length=128 \
+    model.length=1024 \
     sampling.steps=[1,2,4,32] \
+    sampling.solver=euler \
     optim.lr=3e-4 \
     algo.double_temb=True \
     algo.add_boundary=True \
