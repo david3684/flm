@@ -1,8 +1,0 @@
-train: Skylion007/openwebtext-1k
-valid: Skylion007/openwebtext-1k
-tokenizer_name_or_path: gpt2
-cache_dir: ./cache
-wrap: True
-streaming: False
-insert_train_eos: True
-insert_valid_eos: True
