@@ -16,7 +16,6 @@ import transformers
 import wandb
 from torch.cuda.amp import autocast
 import torch.distributed as dist
-from models.muon import MuonWithAuxAdam, SingleDeviceMuonWithAuxAdam
 import dataloader
 import metrics
 import models
@@ -98,7 +97,6 @@ class TrainerBase(L.LightningModule):
         self._pending_ema_state = None
         self._pending_ema_state_list = None
         self._pending_ema_decay_list = None
-        self._pending_shortcut_ema_state = None
         self.T = self.config.algo.T
         self.num_tokens = self.config.model.length
         self.softplus = torch.nn.Softplus()
@@ -125,12 +123,6 @@ class TrainerBase(L.LightningModule):
         else:
             self.ema = None
             self._active_ema_key = None
-        if self.config.training.double_ema > 0:
-            self.shortcut_ema = models.ema.ExponentialMovingAverage(
-                self._get_parameters(),
-                decay=self.config.training.double_ema)
-        else:
-            self.shortcut_ema = None
 
 
         self.lr = self.config.optim.lr
@@ -309,8 +301,6 @@ class TrainerBase(L.LightningModule):
         if self.ema_list and len(self.ema_list) > 1:
             self._pending_ema_state_list = checkpoint.get('ema_list', None)
             self._pending_ema_decay_list = checkpoint.get('ema_decay_list', None)
-        if self.shortcut_ema:
-            self._pending_shortcut_ema_state = checkpoint.get('shortcut_ema', None)
         # Copied from:
         # https://github.com/Dao-AILab/flash-attention/blob/main/training/src/datamodules/language_modeling_hf.py#L41
         self.fast_forward_epochs = checkpoint['loops'][
@@ -328,8 +318,6 @@ class TrainerBase(L.LightningModule):
                 for decay in self.ema_decay_list
             }
             checkpoint['ema_decay_list'] = list(self.ema_decay_list)
-        if self.shortcut_ema:
-            checkpoint['shortcut_ema'] = self.shortcut_ema.state_dict()
         # Copied from:
         # https://github.com/Dao-AILab/flash-attention/blob/main/training/src/tasks/seq.py
         # ['epoch_loop.batch_progress']['total']['completed']
@@ -372,8 +360,6 @@ class TrainerBase(L.LightningModule):
         if self.ema_list and len(self.ema_list) > 1:
             for ema_obj in self.ema_list.values():
                 ema_obj.move_shadow_params_to_device(self.device)
-        if self.shortcut_ema: 
-            self.shortcut_ema.move_shadow_params_to_device(self.device)
         # Adapted from:
         # https://github.com/Dao-AILab/flash-attention/blob/main/training/src/datamodules/language_modeling_hf.py
         distributed = (

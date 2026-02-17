@@ -1216,95 +1216,80 @@ class FLM_distill(trainer_base.TrainerBase):
         d_min = 1.0 / K_max
         max_power = int(math.log2(K_max))
 
-
-        if self.config.algo.sample_d_on_grid:
-            current_max_k = min(self.distill_round , max_power)
-            k_sc = torch.randint(0, current_max_k + 1, (B,), device=self.device)
-            d_sc = (2.0 ** k_sc) * d_min
-
-            num_steps = (1.0 / d_sc).round()
-            i = (torch.rand(B, device=self.device) * num_steps).floor()
-            t_sc = i * d_sc
-            # print(t_sc, d_sc)
-        elif self.config.algo.use_continuous_shortcut:
-            d_sc = self._sample_t_interval(B, current_accumulation_step, t_min = 0.0, t_max = self.d_max_step_size).clamp(min=1e-6)
-            # d_sc = self.d_max_step * torch.ones(B, device=self.device)
-            t_sc = torch.rand(B, device=self.device) * (1.0 - d_sc)
-            if self.config.algo.add_boundary:
-                p_boundary = 1.0 / self.config.algo.boundary_prob
-                is_boundary = torch.rand(B, device=self.device) < p_boundary
-                
-                t_sc = torch.where(is_boundary, torch.tensor(0.0, device=self.device), t_sc)
-                # d_sc = torch.where(is_boundary, torch.tensor(1.0, device=self.device), d_sc)
+        d_sc = self._sample_t_interval(B, current_accumulation_step, t_min = 0.0, t_max = self.d_max_step_size).clamp(min=1e-6)
+        # d_sc = self.d_max_step * torch.ones(B, device=self.device)
+        t_sc = torch.rand(B, device=self.device) * (1.0 - d_sc)
+        if self.config.algo.add_boundary:
+            p_boundary = 1.0 / self.config.algo.boundary_prob
+            is_boundary = torch.rand(B, device=self.device) < p_boundary
+            
+            t_sc = torch.where(is_boundary, torch.tensor(0.0, device=self.device), t_sc)
+            # d_sc = torch.where(is_boundary, torch.tensor(1.0, device=self.device), d_sc)
         
+        c_t_sc = self._alpha_t_to_gamma(t_sc)
+        x_t_sc, _ = self.corrupt_continuous(x0, c_t_sc)
+        
+        f_final_sc = self.forward_no_softmax(x_t_sc, t_sc, t_sc+d_sc)
+        
+        with torch.no_grad():
+            d_half = d_sc / 2.0
+            d_half_view = d_half.view(-1, 1, 1)
+            c_t_sc_view = c_t_sc.view(-1, 1, 1)
 
-        if self.config.algo.shortcut_on_alpha_t: # half on alpha axis
-            c_t_sc = self._alpha_t_to_gamma(t_sc)
-            x_t_sc, _ = self.corrupt_continuous(x0, c_t_sc)
+            c_t_mid = self._alpha_t_to_gamma(t_sc + d_half).view(-1, 1, 1)
+            c_t_end = self._alpha_t_to_gamma(t_sc + d_sc).view(-1, 1, 1)
+            c_d_half_1 = c_t_mid - c_t_sc_view
+            c_d_half_2 = c_t_end - c_t_mid
+            c_d_sc = c_t_end - c_t_sc_view         
+            c_t_sc = c_t_sc_view
+
+            f_theta_s = self.teacher_forward(
+                x_t_sc,
+                t_sc,
+            ).exp()
+                
+            v_s_hat = (f_theta_s - x_t_sc) / (1.0 - c_t_sc + 1e-5)
+            g_theta_s_u = self.forward_no_softmax(
+                x_t_sc, 
+                t_sc, 
+                t_sc+d_half,
+            ) 
+                
+            # v_su_hat = v_s(x_s) + 1/2(u-s)g_theta(x_s,u)
+            v_s_u_hat = (f_theta_s - x_t_sc) / (1.0 - c_t_sc + 1e-5) + (c_d_half_1)/2.0 * g_theta_s_u
             
-            f_final_sc = self.forward_no_softmax(x_t_sc, t_sc, t_sc+d_sc)
+            # F_s,u(x_s) = x_s + (u-s)v_s(x_s) + 1/2(u-s)^2 g_theta(x_s,u)
+            large_f_s_u = x_t_sc + (c_d_half_1) * v_s_hat + 0.5 * (c_d_half_1) ** 2 * g_theta_s_u
             
-            with torch.no_grad():
-                d_half = d_sc / 2.0
-                d_half_view = d_half.view(-1, 1, 1)
-                c_t_sc_view = c_t_sc.view(-1, 1, 1)
+            f_theta_u = self.teacher_forward(
+                large_f_s_u, 
+                t_sc + d_half,
+            ).exp()
+                
+            v_u_hat = (f_theta_u - large_f_s_u) / (1.0 - c_t_mid + 1e-5)
+            g_theta_u_t = self.forward_no_softmax(
+                large_f_s_u, 
+                t_sc + d_half, 
+                # d_half,
+                t_sc+d_sc,
+            ) 
 
-                c_t_mid = self._alpha_t_to_gamma(t_sc + d_half).view(-1, 1, 1)
-                c_t_end = self._alpha_t_to_gamma(t_sc + d_sc).view(-1, 1, 1)
-                c_d_half_1 = c_t_mid - c_t_sc_view
-                c_d_half_2 = c_t_end - c_t_mid
-                c_d_sc = c_t_end - c_t_sc_view         
-                c_t_sc = c_t_sc_view
-
-                f_theta_s = self.teacher_forward(
-                    x_t_sc,
-                    t_sc,
-                ).exp()
-                    
-                v_s_hat = (f_theta_s - x_t_sc) / (1.0 - c_t_sc + 1e-5)
-                g_theta_s_u = self.forward_no_softmax(
-                    x_t_sc, 
-                    t_sc, 
-                    t_sc+d_half,
-                ) 
-                    
-                # v_su_hat = v_s(x_s) + 1/2(u-s)g_theta(x_s,u)
-                v_s_u_hat = (f_theta_s - x_t_sc) / (1.0 - c_t_sc + 1e-5) + (c_d_half_1)/2.0 * g_theta_s_u
-                
-                # F_s,u(x_s) = x_s + (u-s)v_s(x_s) + 1/2(u-s)^2 g_theta(x_s,u)
-                large_f_s_u = x_t_sc + (c_d_half_1) * v_s_hat + 0.5 * (c_d_half_1) ** 2 * g_theta_s_u
-                
-                f_theta_u = self.teacher_forward(
-                    large_f_s_u, 
-                    t_sc + d_half,
-                ).exp()
-                    
-                v_u_hat = (f_theta_u - large_f_s_u) / (1.0 - c_t_mid + 1e-5)
-                g_theta_u_t = self.forward_no_softmax(
-                    large_f_s_u, 
-                    t_sc + d_half, 
-                    # d_half,
-                    t_sc+d_sc,
-                ) 
-
-                # v_u,t_hat(x_u') = v_u(x_u') + 1/2*(t-u)*g_theta(x_u',u, t)
-                v_u_t_hat = v_u_hat + (c_d_half_2)/2.0 * g_theta_u_t
-                
-                t_minus_s = c_d_sc
-                v_hat = (c_d_half_1 * v_s_u_hat + c_d_half_2 * v_u_t_hat) / t_minus_s
-                
-                # x_1_hat = stopgrad(x_s + (1-s)*v_hat)
-                x_boot = x_t_sc + (1.0 - c_t_sc) * v_hat
-                x_boot = x_boot.detach()
+            # v_u,t_hat(x_u') = v_u(x_u') + 1/2*(t-u)*g_theta(x_u',u, t)
+            v_u_t_hat = v_u_hat + (c_d_half_2)/2.0 * g_theta_u_t
+            
+            t_minus_s = c_d_sc
+            v_hat = (c_d_half_1 * v_s_u_hat + c_d_half_2 * v_u_t_hat) / t_minus_s
+            
+            # x_1_hat = stopgrad(x_s + (1-s)*v_hat)
+            x_boot = x_t_sc + (1.0 - c_t_sc) * v_hat
+            x_boot = x_boot.detach()
         
         f_final_fm = f_theta_s
             
         weight = 0.5 * c_d_sc * (1.0 - c_t_sc)
         f_final = f_final_fm + weight * f_final_sc
-
-        if self.config.algo.shortcut_loss_type == 'mse':
-            error = x_boot - f_final  # (B, L, V)
-            loss = (error ** 2).mean(dim=-1) * self.vocab_size  # (B, L)
+        error = x_boot - f_final  # (B, L, V)
+        loss = (error ** 2).mean(dim=-1) * self.vocab_size  # (B, L)
         
                             
         if self.config.algo.learnable_loss_weighting is True:

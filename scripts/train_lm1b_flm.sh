@@ -4,12 +4,12 @@ python -u -m main \
   loader.batch_size=32 \
   loader.eval_batch_size=32 \
   data=lm1b-wrap \
-  data.cache_dir=YOUR_DATASET_PATH \
+  data.cache_dir=/home/work/RADAR/workspace/KAIST/cdBDD/datasets/lm1b \
   wandb.project=lm1b_full \
   wandb.name=lm1b_full_flm \
   model=small \
   algo=flm \
-  model.length=1024 \
+  model.length=128 \
   sampling.num_sample_batches=1 \
   sampling.solver=euler \
   sampling.steps=[1024] \
