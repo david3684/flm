@@ -1,14 +1,17 @@
+DATA_DIR="YOUR_DATA_DIR"
+TEACHER_PATH="YOUR_FLM_CHECKPOINT_PATH"
+
 python -u -m main \
-    loader.global_batch_size=512 \
-    loader.batch_size=128 \
-    loader.eval_batch_size=128 \
+    loader.global_batch_size=128 \
+    loader.batch_size=16 \
+    loader.eval_batch_size=16 \
     data=openwebtext-split \
-    data.cache_dir=/home/work/RADAR/workspace/KAIST/cdBDD/datasets/openwebtext \
+    data.cache_dir=$DATA_DIR \
     wandb.project=owt_distill \
-    wandb.name=flm_diatill \
+    wandb.name=flm_distill \
     model=small \
     algo=flm_semigroup_distill \
-    algo.teacher_path=/home/work/RADAR/workspace/KAIST/discrete-mean-flow/text/outputs/lm1b/2026.01.07/000819/checkpoints/73-1000000.ckpt \
+    algo.teacher_path=$TEACHER_PATH \
     trainer.max_steps=1000000 \
     trainer.precision=bf16 \
     trainer.val_check_interval=10000 \
@@ -23,4 +26,3 @@ python -u -m main \
     algo.learnable_loss_weighting=True \
     callbacks.checkpoint_every_n_steps.every_n_train_steps=20000 \
     checkpointing.resume_from_ckpt=False \
-    

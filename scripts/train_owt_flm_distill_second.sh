@@ -1,15 +1,19 @@
+DATA_DIR="YOUR_DATA_DIR"
+TEACHER_F_PATH="YOUR_FLM_CHECKPOINT_PATH"
+TEACHER_G_PATH="YOUR_FMLM_CHECKPOINT_PATH"
+
 python -u -m main \
     loader.global_batch_size=512 \
     loader.batch_size=128 \
     loader.eval_batch_size=128 \
     data=openwebtext-split \
-    data.cache_dir=/home/work/RADAR/workspace/KAIST/cdBDD/datasets/openwebtext \
+    data.cache_dir=$DATA_DIR \
     wandb.project=flm_distill \
     wandb.name=second_phase_distill \
     model=small \
     algo=flm_distill_double \
-    algo.teacher_f_path=/home/work/RADAR/workspace/KAIST/discrete-mean-flow/text/outputs/lm1b/2026.01.07/000819/checkpoints/73-1000000.ckpt \
-    algo.teacher_g_path="/home/work/RADAR/workspace/KAIST/discrete-mean-flow/text/outputs/lm1b/2026.01.22/015052/checkpoints/last.ckpt" \
+    algo.teacher_f_path=$TEACHER_F_PATH \
+    algo.teacher_g_path=$TEACHER_G_PATH \
     trainer.max_steps=1000000 \
     trainer.precision=bf16 \
     trainer.val_check_interval=5000 \

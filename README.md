@@ -9,9 +9,7 @@ Official code for the paper **"One-step Language Modeling via Continuous Denoisi
 [![Paper](https://img.shields.io/badge/Paper-Coming%20Soon-lightgrey)](https://github.com/david3684/flm)
 [![arXiv](https://img.shields.io/badge/arXiv-Coming%20Soon-lightgrey)](https://github.com/david3684/flm)
 [![Project Page](https://img.shields.io/badge/Project-Page-blue)](https://one-step-lm.github.io/)
-[![Code](https://img.shields.io/badge/Code-GitHub-black)](https://github.com/david3684/flm)
 
----
 
 ## TL;DR
 
@@ -33,9 +31,68 @@ FLM applies the benefits of continuous image generation to discrete state spaces
 
 
 
-## Installation & Usage
+## How to Run
 
-Coming soon.
+### Requirements
+
+- Python 3.9+
+
+### Install Dependencies
+
+```bash
+pip install torch>=2.3.0
+pip install -r requirements.txt
+# Install flash-attn separately matching your python / torch version (see https://github.com/Dao-AILab/flash-attention/releases)
+pip install flash-attn==2.5.8 --no-build-isolation
+```
+
+Our DiT backbone supports `torch.compile` with `max-autotune` for faster training. Enable it by setting the environment variable before running any script:
+
+```bash
+export DIT_USE_COMPILE=TRUE
+```
+
+With the option, we are able to train OpenWebText experiments with 512 batch size on 8 H100 (80GB VRAM), without gradient accumulation.
+
+### Training
+
+Before running, update `data.cache_dir` in the scripts to point to your dataset location. If the directory is empty, the dataset will be automatically downloaded and preprocessed.
+
+**FLM Training** (1M steps)
+
+| Dataset | Script |
+|---|---|
+| LM1B | [scripts/train_lm1b_flm.sh](scripts/train_lm1b_flm.sh) |
+| OpenWebText | [scripts/train_owt_flm.sh](scripts/train_owt_flm.sh) |
+
+**Flow Map Distillation**
+
+Set `algo.teacher_path` to your pre-trained FLM checkpoint before running.
+
+| Dataset | Script |
+|---|---|
+| LM1B | [scripts/train_lm1b_flm_distill.sh](scripts/train_lm1b_flm_distill.sh) |
+| OpenWebText | [scripts/train_owt_flm_distill.sh](scripts/train_owt_flm_distill.sh) |
+
+**Second Stage Distillation** (optional)
+
+Set `algo.teacher_path_f` to your pre-trained FLM checkpoint and `algo.teacher_path_g` to your distilled backbone from above script.
+
+| Dataset | Script |
+|---|---|
+| LM1B | [scripts/train_lm1b_flm_distill_second.sh](scripts/train_lm1b_flm_distill_second.sh) |
+| OpenWebText | [scripts/train_owt_flm_distill_second.sh](scripts/train_owt_flm_distill_second.sh) |
+
+### Evaluation
+
+Set `CKPT_PATH` in the script to your trained checkpoint before running.
+
+| Model | Dataset | Script |
+|---|---|---|
+| FLM | LM1B | [scripts/gen_ppl_lm1b_flm.sh](scripts/gen_ppl_lm1b_flm.sh) |
+| FLM | OpenWebText | [scripts/gen_ppl_owt_flm.sh](scripts/gen_ppl_owt_flm.sh) |
+| FMLM | LM1B | [scripts/gen_ppl_lm1b_flm_distill_double.sh](scripts/gen_ppl_lm1b_flm_distill_double.sh) |
+| FMLM | OpenWebText | [scripts/gen_ppl_owt_flm_distill_double.sh](scripts/gen_ppl_owt_flm_distill_double.sh) |
 
 
 
@@ -44,7 +101,7 @@ Coming soon.
 ```bibtex
 @article{lee2025flm,
   author    = {Lee, Chanhyuk and Yoo, Jaehoon and Agarwal, Manan and Shah, Sheel and Huang, Jerry and Raghunathan, Aditi and Hong, Seunghoon and Boffi, Nicholas M. and Kim, Jinwoo},
-  title     = {Continuous Denoising Enables One-step Language Modeling},
+  title     = {One-step Language Modeling via Continuous Denoising},
   journal   = {arXiv preprint},
   year      = {2025},
 }
@@ -52,9 +109,6 @@ Coming soon.
 
 ---
 
-## License
-
-See [LICENSE](LICENSE).
 
 ## Acknowledgements
 

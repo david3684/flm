@@ -8,37 +8,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import wandb
-import matplotlib.pyplot as plt
 import trainer_base
 import utils
 import math
 import models
-from torch.func import functional_call, jvp
+from torch.func import functional_call
 from models.dit import modulate_fused
-from torch.func import vmap, functional_call, stack_module_state
 import functools
-
-def adaptive_l2_loss(error, gamma=0.5, c=1e-3):
-    """
-    Adaptive L2 loss: sg(w) * ||Δ||_2^2, where w = 1 / (||Δ||^2 + c)^p, p = 1 - γ
-    Args:
-        error: Tensor of shape (B, C, W, H)
-        gamma: Power used in original ||Δ||^{2γ} loss
-        c: Small constant for stability
-    Returns:
-        Scalar loss
-    """
-    delta_sq = torch.mean(error ** 2, dim=(1, 2, 3), keepdim=False)
-    p = 1.0 - gamma
-    w = 1.0 / (delta_sq + c).pow(p)
-    loss = delta_sq  # ||Δ||^2
-    return (stopgrad(w) * loss).mean(dim=-1)
-
-
-def stopgrad(x):
-    """Stop gradient for x."""
-    return x.detach()
-
 
 class AR(trainer_base.TrainerBase):
     def __init__(self, config, tokenizer):

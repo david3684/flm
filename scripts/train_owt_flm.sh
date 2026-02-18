@@ -1,10 +1,11 @@
+DATA_DIR="YOUR_DATA_DIR"
 
 python -u -m main \
   loader.global_batch_size=512 \
   loader.batch_size=32 \
   loader.eval_batch_size=32 \
   data=openwebtext-split \
-  data.cache_dir=/home/work/RADAR/workspace/KAIST/cdBDD/datasets/openwebtext \
+  data.cache_dir=$DATA_DIR \
   wandb.project=owt_full \
   wandb.name=owt_full_flm \
   model=small \

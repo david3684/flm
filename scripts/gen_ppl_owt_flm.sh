@@ -6,7 +6,7 @@ python -u -m main \
       seed=1 \
       model=small \
       model.length=1024 \
-      data=lm1b-wrap \
+      data=openwebtext-split \
       algo=flm \
       eval.checkpoint_path=$CKPT_PATH \
       loader.batch_size=2 \
