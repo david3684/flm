@@ -31,11 +31,7 @@ FLM applies the benefits of continuous image generation to discrete state spaces
 
 
 
-## How to Run
-
-### Requirements
-
-- Python 3.9+
+## How to Run햐
 
 ### Install Dependencies
 
@@ -43,7 +39,7 @@ FLM applies the benefits of continuous image generation to discrete state spaces
 pip install torch>=2.3.0
 pip install -r requirements.txt
 # Install flash-attn separately matching your python / torch version (see https://github.com/Dao-AILab/flash-attention/releases)
-pip install flash-attn==2.5.8 --no-build-isolation
+pip install flash-attn==2.8.3 --no-build-isolation
 ```
 
 Our DiT backbone supports `torch.compile` with `max-autotune` for faster training. Enable it by setting the environment variable before running any script:
