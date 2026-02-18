@@ -1,4 +1,4 @@
-# Continuous Denoising Enables One-step Language Modeling
+# One-step Language Modeling via Continuous Denoising
 
 Official code for the paper **"One-step Language Modeling via Continuous Denoising"**
 
