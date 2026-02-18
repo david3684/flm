@@ -31,7 +31,7 @@ FLM applies the benefits of continuous image generation to discrete state spaces
 
 
 
-## How to Run햐
+## How to Run
 
 ### Install Dependencies
 
