@@ -6,7 +6,7 @@ Official code for the paper **"One-step Language Modeling via Continuous Denoisi
 
 <sup>1</sup>KAIST &nbsp; <sup>2</sup>Carnegie Mellon University &nbsp; <sup>†</sup>Equal advising
 
-[![Paper](https://img.shields.io/badge/Paper-PDF-red)](assets/paper.pdf)
+[![Paper](https://img.shields.io/badge/Paper-PDF-red)](https://arxiv.org/pdf/2602.16813)
 [![arXiv](https://img.shields.io/badge/arXiv-2602.16813-b31b1b.svg)](https://arxiv.org/abs/2602.16813)
 [![Project Page](https://img.shields.io/badge/Project-Page-blue)](https://one-step-lm.github.io/)
 
