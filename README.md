@@ -1,15 +1,15 @@
 # One-step Language Modeling via Continuous Denoising
 
-Official code for the paper **"One-step Language Modeling via Continuous Denoising"**
-
-**[Chanhyuk Lee](https://david3684.github.io)**<sup>1</sup>, **[Jaehoon Yoo](https://sites.google.com/view/jaehoon-yoo/홈)**<sup>1</sup>, **[Manan Agarwal](https://mananag007.github.io)**<sup>2</sup>, **[Sheel Shah](https://sheelfshah.github.io)**<sup>2</sup>, **[Jerry Huang](https://jrrhuang.github.io/)**<sup>2</sup>, **[Aditi Raghunathan](https://www.cs.cmu.edu/~aditirag/)**<sup>2</sup>, **[Seunghoon Hong](https://maga33.github.io/)**<sup>1</sup>, **[Nicholas M. Boffi](https://nmboffi.github.io/)**<sup>†2</sup>, **[Jinwoo Kim](https://jw9730.github.io/)**<sup>†1</sup>
+**[Chanhyuk Lee](https://david3684.github.io)**<sup>1</sup>, **[Jaehoon Yoo](https://sites.google.com/view/jaehoon-yoo/홈)**<sup>1</sup>, **[Manan Agarwal](https://mananag007.github.io)**<sup>2</sup>, **[Sheel Shah](https://sheelfshah.github.io)**<sup>2</sup>, **[Jerry Huang](https://jrrhuang.github.io/)**<sup>2</sup>, \
+**[Aditi Raghunathan](https://www.cs.cmu.edu/~aditirag/)**<sup>2</sup>, **[Seunghoon Hong](https://maga33.github.io/)**<sup>1</sup>, **[Nicholas M. Boffi](https://nmboffi.github.io/)**<sup>†2</sup>, **[Jinwoo Kim](https://jw9730.github.io/)**<sup>†1</sup>
 
 <sup>1</sup>KAIST &nbsp; <sup>2</sup>Carnegie Mellon University &nbsp; <sup>†</sup>Equal advising
 
-[![Paper](https://img.shields.io/badge/Paper-PDF-red)](https://arxiv.org/pdf/2602.16813)
-[![arXiv](https://img.shields.io/badge/arXiv-2602.16813-b31b1b.svg)](https://arxiv.org/abs/2602.16813)
-[![Project Page](https://img.shields.io/badge/Project-Page-blue)](https://one-step-lm.github.io/)
+<div align="left">
 
+[**[Project Page]**](https://one-step-lm.github.io/) | [**[Paper]**](https://arxiv.org/abs/2602.16813)
+
+</div>
 
 ## TL;DR
 
