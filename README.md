@@ -94,7 +94,14 @@ Set `CKPT_PATH` in the script to your trained checkpoint before running.
 
 ## BibTeX
 
-Coming Soon
+```bibtex
+@article{lee2026one,
+    title={One-step Language Modeling via Continuous Denoising}, 
+    author={Chanhyuk Lee and Jaehoon Yoo and Manan Agarwal and Sheel Shah and Jerry Huang and Aditi Raghunathan and Seunghoon Hong and Nicholas M. Boffi and Jinwoo Kim},
+    journal={arXiv preprint arXiv:2602.16813},
+    year={2026}
+}
+```
 
 ---
 
