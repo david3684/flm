@@ -108,4 +108,4 @@ Set `CKPT_PATH` in the script to your trained checkpoint before running.
 
 ## Acknowledgements
 
-This codebase builds upon [DUO](https://github.com/s-sahoo/duo).
+This codebase builds upon [DUO](https://github.com/s-sahoo/duo) and [ReDi](https://github.com/Ugness/ReDi)
