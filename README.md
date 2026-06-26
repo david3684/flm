@@ -1,4 +1,4 @@
-<h1 align="center">Flow Map Language Models:<br>One-step Language Modeling via Continuous Denoising</h1>
+<img width="870" height="182" alt="image" src="https://github.com/user-attachments/assets/0b544a80-3146-4cd9-a923-55bb5130e0a1" /><h1 align="center">Flow Map Language Models:<br>One-step Language Modeling via Continuous Denoising</h1>
 
 <div align="center">
   
@@ -21,7 +21,7 @@
 </div>
 
 ## News
-
+- **[2026-06]** Released code for [posterior refinement](https://github.com/MananAg007/posterior-refinement).
 - **[2026-05]** Added huggingface links for the checkpoints. 
 - **[2026-04]** We released LM1B/OpenWebText checkpoints for FLM and FMLM. 
 
