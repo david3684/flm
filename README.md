@@ -1,4 +1,4 @@
-<img width="870" height="182" alt="image" src="https://github.com/user-attachments/assets/0b544a80-3146-4cd9-a923-55bb5130e0a1" /><h1 align="center">Flow Map Language Models:<br>One-step Language Modeling via Continuous Denoising</h1>
+<h1 align="center">Flow Map Language Models:<br>One-step Language Modeling via Continuous Denoising</h1>
 
 <div align="center">
   
