@@ -21,6 +21,7 @@
 </div>
 
 ## News
+- **[2026-09]** FMLM has been Accepted to NeurIPS 2026!
 - **[2026-06]** Released code for [posterior refinement](https://github.com/MananAg007/posterior-refinement).
 - **[2026-06]** Released code for [self-conditioned FMLM](https://github.com/Ugness/self-conditioned-fmlm).
 - **[2026-05]** Added huggingface links for the checkpoints. 
